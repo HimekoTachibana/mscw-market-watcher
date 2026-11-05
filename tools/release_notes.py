@@ -48,10 +48,8 @@ def build_notes(changelog: str, current: str, releases: list[dict] | None = None
     cur = ver(current)
     seen = documented(releases or [])
     seen.discard(cur)  # the release being made is not published yet (a re-run must still describe it)
-    tags = [ver(r["tag"]) for r in (releases or []) if r.get("tag")]
-    floor = min(tags) if tags else cur  # versions older than the first release ever published are history
     picked = [(v, h, b) for v, h, b in sections(changelog)
-              if v == cur or (releases is not None and floor < v < cur and v not in seen)]
+              if v == cur or (releases is not None and v < cur and v not in seen)]
     if not any(v == cur for v, _, _ in picked):
         return f"Release {current}\n"
     if len(picked) == 1:

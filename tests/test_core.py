@@ -187,3 +187,10 @@ def test_release_notes_without_release_history_and_missing_section():
     m = _notes_tool()
     assert m.build_notes(CHANGELOG, "v0.6.0", None) == "- six\n"
     assert m.build_notes(CHANGELOG, "v9.9.9", []) == "Release v9.9.9\n"
+
+
+def test_release_notes_include_versions_from_before_the_first_release():
+    m = _notes_tool()
+    log = CHANGELOG + "\n## v0.5.6 - old\n- pre-release history\n"
+    out = m.build_notes(log, "v0.6.0", [{"tag": "v0.5.9", "body": ""}, {"tag": "v0.5.8", "body": ""}, {"tag": "v0.5.7", "body": ""}])
+    assert "pre-release history" in out and out.index("## v0.6.0") < out.index("## v0.5.6")

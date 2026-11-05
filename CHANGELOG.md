@@ -24,7 +24,8 @@
   narrows the list). The default is **Gloves Crit. Rate Scroll: Intermediate** and your last choice is remembered.
 - **Release notes can no longer miss changes:** the notes of each release now contain its own section plus every
   earlier CHANGELOG version that no release has described yet (`tools/release_notes.py`; tested). Versions
-  v0.5.2 and v0.5.4 were never published on their own, so their notes (below) appear in this release's notes.
+  v0.5.2 and v0.5.4 were never published on their own, and v0.1.0-v0.3.1 came before the first GitHub release
+  (v0.4.0), so their notes (below) all appear in this release's notes.
   Releases are numbered from the latest published release (v0.5.5), so no number is skipped.
 - The build now runs the program's self-test (window, Live Feed, browser driver) before packaging.
 
