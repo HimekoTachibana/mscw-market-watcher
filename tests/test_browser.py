@@ -624,3 +624,11 @@ def test_old_layout_without_the_tab_still_works(src, site):
     src.cfg["browser"].update(start_url=site + "/real")
     src.cfg["watchlist"] = [{"name": "Piece of Ice", "max_price": None}]
     assert [l.seller for l in src.fetch()] == ["Iceman"] and src.forsale_info == ""
+
+
+def test_scrolling_stops_at_the_show_listings_from_the_last_limit(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?mode=lazy", lookback_min=60)  # rows are 2, 4, ... 120 minutes old
+    ls = fsn.fetch()
+    assert len(ls) == 29 and max(l.age_min for l in ls) == 58  # the "1h ago" row is not inside a 1 hour window
+    si = fsn.scroll_info
+    assert "older than the look-back" in si["stop"] and si["loads"] <= 3  # it did not keep loading all 60 rows

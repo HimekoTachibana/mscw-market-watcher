@@ -672,7 +672,10 @@ class BrowserSource:
                 if not p:
                     continue
                 parsed += 1
-                if p["age_min"] is None or p["age_min"] > lookback:
+                # "Nh ago" / "Nd ago" are rounded down (1h can be 1h59m), so a row showing exactly the limit is
+                # already at or over it
+                coarse = bool(re.match(r"\d+\s*[hd]", p.get("listed") or "", re.I))
+                if p["age_min"] is None or p["age_min"] > lookback or (coarse and p["age_min"] >= lookback):
                     reached_old = True  # the list is newest-first, so everything below is older
                     continue
                 k = (p["seller"], p["channel"], p["location"], p["price"])

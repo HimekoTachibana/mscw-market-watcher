@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.3 - 2026-11-05
+- Scrolling stops as soon as a listing is older than **Show listings from the last** (the box in the main
+  window). The site rounds hours down ("1h ago" may be 1h59m), so a row that shows exactly the limit now counts
+  as over it; with "1 hour" the program no longer reads or scrolls into the "1h ago" rows.
+
 ## v0.5.2 - 2026-11-05
 - **New way to find and open an item.** The program types the item name, then clicks the search results one by
   one (top to bottom) and stops at the first one whose right-hand panel shows the same item name. The icon is
