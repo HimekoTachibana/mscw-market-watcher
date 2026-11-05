@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.0 - 2026-11-04
+- **Auto-update:** Settings > **Check for updates** looks at the project's GitHub releases. If a newer
+  version exists, a popup shows what's new with **Update** and **Cancel**. Update downloads the build for
+  your system (Windows, Linux or macOS), checks it, installs it, and reopens the program by itself.
+  Your settings, watchlist and listings are kept.
+- The program also checks quietly when it starts (turn this off under Settings > General). It only
+  speaks up if there is a newer release.
+- Copies run from the source code, or from a renamed or read-only folder, can't replace themselves; the
+  popup then offers to open the release page instead.
+- v0.4.0 has no updater, so install v0.5.0 once by hand; from then on updates are automatic.
+
 ## v0.4.0 - 2026-11-03
 - **Live Feed and Watchlist** now have scroll bars, and a draggable divider between them: drag it up or
   down to resize. The divider position and column widths are remembered.

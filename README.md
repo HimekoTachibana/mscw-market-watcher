@@ -100,6 +100,21 @@ program inside it). The version comes from `VERSION` in `mesowatcher/core.py`.
   -> Run workflow: tick **Publish a release** to create the tag `v<VERSION>` and the release from the
   selected branch without using git on your computer, or leave it unticked to only get Artifacts.
 
+## Updating the program
+
+Settings > **Check for updates** asks GitHub for the latest release of `update_repo` (default
+`HimekoTachibana/mscw-market-watcher`, editable in `config.json`). If it is newer than the running
+version you get a popup with **Update** / **Cancel**. Update downloads the Windows / Linux / macOS file
+for your system, verifies its size and SHA-256, unpacks it next to the installed program, then closes the
+program, swaps the folders (the old one is deleted, or restored if something fails) and starts the new
+version. The folder is named after the version, so the new folder is `MSCW Market Watcher vX.Y.Z` next to
+the old one's location; update any shortcut once. Settings, watchlist and listings live in your user data
+folder and are not touched.
+
+Needs a packaged build in a writable folder whose name still starts with "MSCW Market Watcher"; otherwise
+the popup offers to open the release page. The program also checks quietly at start-up (switch off under
+Settings > General).
+
 ## Releasing a new version
 
 Bump `VERSION` in `mesowatcher/core.py`, add a section at the top of `CHANGELOG.md`

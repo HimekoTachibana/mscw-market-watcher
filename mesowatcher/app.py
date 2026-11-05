@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -15,7 +17,7 @@ try:
 except ImportError:  # icons are optional
     Image = ImageTk = None
 
-from . import browser, core
+from . import browser, core, updater
 
 COLS = [("item", "Item Name", 230), ("seller", "Seller", 110), ("channel", "Channel", 65),
         ("location", "Location", 170), ("price", "Price", 90), ("listed", "Listed", 90),
@@ -238,6 +240,13 @@ class App(tk.Tk):
         self.after(200, self._drain)
         self.after(int((60 - time.time() % 60) * 1000) + 300, self._tick_minute)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.uq: queue.Queue = queue.Queue()  # messages from the update threads
+        self._update_busy = False
+        self._update_cancel = threading.Event()
+        self._dl: dict = {}
+        self.after(400, self._poll_updates)
+        if self.cfg["update_check_on_start"] and getattr(sys, "frozen", False):
+            self.after(6000, lambda: self.check_updates(manual=False))
         if not self.items.items or self.items.age_days > 7:
             self.after(600, self.refresh_items)
 
@@ -906,6 +915,9 @@ class App(tk.Tk):
         # ---- tab 3: general
         f3 = tab("General")
         g_contact = field(f3, "Contact (email/Discord), sent in the User-Agent of item-list downloads", self.cfg["contact"])
+        ttk.Label(f3, text=f"Installed version: v{core.VERSION}").pack(anchor="w", pady=(14, 0))
+        upd_on = tk.BooleanVar(value=self.cfg["update_check_on_start"])
+        ttk.Checkbutton(f3, text="Check for a new release when the program starts", variable=upd_on).pack(anchor="w")
 
         def apply() -> bool:
             try:
@@ -927,6 +939,7 @@ class App(tk.Tk):
             self.cfg["meowdb_enabled"] = meow_on.get()
             self.cfg["meowdb_add_missing"] = add_on.get()
             self.cfg["contact"] = g_contact().strip()
+            self.cfg["update_check_on_start"] = upd_on.get()
             self.cfg.save()
             return True
 
@@ -964,6 +977,180 @@ class App(tk.Tk):
         ttk.Button(bar, text="Update item database", command=refresh).pack(side="left")
         ttk.Button(bar, text="Cross-check report", command=report).pack(side="left", padx=6)
         ttk.Button(bar, text="Changelog", command=self.show_changelog).pack(side="right")
+        ttk.Button(bar, text="Check for updates", command=lambda: self.check_updates(manual=True, parent=w)
+                   ).pack(side="right", padx=6)
+
+    # ------------------------------------------------------------ updates
+    def check_updates(self, manual: bool = True, parent=None):
+        """Ask GitHub for the latest release. manual=True (button) always answers; False (startup) is silent."""
+        if self._update_busy:
+            if manual:
+                messagebox.showinfo("Update", "An update check or download is already running.",
+                                    parent=self._ok_parent(parent))
+            return
+        self._update_busy = True
+        if manual:
+            self.status.set("Checking for updates...")
+        repo = self.cfg["update_repo"]
+
+        def work():
+            try:
+                self.uq.put(("checked", manual, parent, updater.check(repo)))
+            except updater.UpdateError as e:
+                self.uq.put(("check_error", manual, parent, str(e)))
+            except Exception as e:  # never let a thread die silently
+                self.uq.put(("check_error", manual, parent, f"The update check failed: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ok_parent(self, parent):
+        try:
+            return parent if parent is not None and parent.winfo_exists() else self
+        except tk.TclError:
+            return self
+
+    def _poll_updates(self):
+        try:
+            while True:
+                msg = self.uq.get_nowait()
+                kind = msg[0]
+                if kind == "checked":
+                    _, manual, parent, rel = msg
+                    self._update_busy = False
+                    if rel is None:
+                        self.status.set(f"You have the latest version (v{core.VERSION}).")
+                        if manual:
+                            messagebox.showinfo("Check for updates", f"You are running the latest version "
+                                                f"(v{core.VERSION}).", parent=self._ok_parent(parent))
+                    else:
+                        self.status.set(f"Update available: {rel.tag}")
+                        self._offer_update(rel, parent)
+                elif kind == "check_error":
+                    _, manual, parent, text = msg
+                    self._update_busy = False
+                    self.status.set("Could not check for updates.")
+                    if manual:
+                        messagebox.showwarning("Check for updates", text, parent=self._ok_parent(parent))
+                elif kind == "progress" and self._dl:
+                    _, done, total = msg
+                    if total:
+                        self._dl["bar"].config(mode="determinate", maximum=total, value=done)
+                        self._dl["pct"].set(f"{done / 1048576:.1f} of {total / 1048576:.1f} MB")
+                elif kind == "stage" and self._dl:
+                    self._dl["label"].set(msg[1])
+                elif kind == "ready":
+                    self._apply_update(msg[1])
+                elif kind == "failed":
+                    _, rel, text = msg
+                    self._update_busy = False
+                    self._close_dl()
+                    self.status.set("Update failed.")
+                    if rel is not None and messagebox.askyesno(
+                            "Update failed", f"{text}\n\nOpen the release page to download it yourself?"):
+                        webbrowser.open(rel.page_url)
+        except queue.Empty:
+            pass
+        try:
+            self.after(150, self._poll_updates)
+        except tk.TclError:  # the window was closed (for instance by the update restart)
+            pass
+
+    def _offer_update(self, rel, parent=None):
+        """The 'new version available' popup with Update and Cancel."""
+        d = tk.Toplevel(self._ok_parent(parent))
+        d.title("Update available")
+        d.geometry("520x380")
+        d.transient(self)
+        f = ttk.Frame(d, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, font=("TkDefaultFont", 11, "bold"),
+                  text=f"A new version of {core.FULL_NAME} is available").pack(anchor="w")
+        ttk.Label(f, text=f"Installed: v{core.VERSION}     New: {rel.tag}").pack(anchor="w", pady=(2, 8))
+        ttk.Label(f, text="What's new:").pack(anchor="w")
+        t = tk.Text(f, wrap="word", height=10, padx=8, pady=6)
+        t.insert("1.0", rel.notes or "(no release notes)")
+        t.config(state="disabled")
+        t.pack(fill="both", expand=True, pady=(2, 8))
+        ttk.Label(f, foreground="#555", wraplength=480,
+                  text="Update downloads the new version, installs it, and reopens the program. "
+                       "Your settings and watchlist are kept.").pack(anchor="w", pady=(0, 8))
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Cancel", command=d.destroy).pack(side="right")
+        ttk.Button(bar, text="Update", command=lambda: (d.destroy(), self._start_update(rel))
+                   ).pack(side="right", padx=6)
+        d.protocol("WM_DELETE_WINDOW", d.destroy)
+        d.lift()
+        d.focus_force()
+
+    def _start_update(self, rel):
+        why = updater.problem(updater.install_target())
+        if why:
+            if messagebox.askyesno("Update", f"This copy cannot update itself.\n\n{why}\n\n"
+                                   "Open the release page to download the new version?"):
+                webbrowser.open(rel.page_url)
+            return
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self._update_cancel.clear()
+        d = tk.Toplevel(self)
+        d.title("Updating")
+        d.geometry("420x140")
+        d.transient(self)
+        d.resizable(False, False)
+        label, pct = tk.StringVar(value=f"Downloading {rel.tag} ..."), tk.StringVar(value="")
+        ttk.Label(d, textvariable=label).pack(anchor="w", padx=14, pady=(14, 4))
+        bar = ttk.Progressbar(d, mode="indeterminate", length=390)
+        bar.pack(padx=14)
+        bar.start(12)
+        ttk.Label(d, textvariable=pct, foreground="#555").pack(anchor="w", padx=14, pady=(4, 0))
+        cancel = ttk.Button(d, text="Cancel", command=self._update_cancel.set)
+        cancel.pack(side="bottom", pady=10)
+        d.protocol("WM_DELETE_WINDOW", self._update_cancel.set)
+        self._dl = {"win": d, "bar": bar, "label": label, "pct": pct, "cancel": cancel}
+        target = updater.install_target()
+
+        def work():
+            try:
+                plan = updater.prepare(
+                    rel, target, progress=lambda a, b: self.uq.put(("progress", a, b)),
+                    status=lambda s: self.uq.put(("stage", s)), cancel=self._update_cancel)
+                self.uq.put(("ready", plan))
+            except updater.UpdateError as e:
+                self.uq.put(("failed", None if self._update_cancel.is_set() else rel, str(e)))
+            except Exception as e:
+                self.uq.put(("failed", rel, f"The update failed: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _close_dl(self):
+        try:
+            if self._dl:
+                self._dl["win"].destroy()
+        except tk.TclError:
+            pass
+        self._dl = {}
+
+    def _apply_update(self, plan):
+        """Download is done: hand over to the helper script, quit, and let it install and reopen the program."""
+        if self._dl:
+            self._dl["label"].set("Installing - the program will close and reopen ...")
+            self._dl["cancel"].state(["disabled"])
+            self._dl["bar"].config(mode="indeterminate")
+            self._dl["bar"].start(12)
+            self.update_idletasks()
+        try:
+            updater.start_helper(plan)
+        except Exception as e:
+            import shutil
+            shutil.rmtree(plan.stage, ignore_errors=True)
+            self._update_busy = False
+            self._close_dl()
+            messagebox.showerror("Update failed", f"The update could not be started: {e}")
+            return
+        self._close()  # stops polling, saves everything, closes the window
+        t = threading.Timer(8, os._exit, args=(0,))  # make sure the process really ends so the files can be replaced
+        t.daemon = True
+        t.start()
 
     def show_changelog(self):
         p = resource_path("CHANGELOG.md")

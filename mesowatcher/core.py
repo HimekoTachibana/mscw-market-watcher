@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -90,6 +90,8 @@ DEFAULT_CONFIG = {
     },
     "custom_headers": {},  # e.g. {"Authorization": "Bearer ..."}
     "contact": "",  # shown in the User-Agent so the owners can reach you
+    "update_repo": "HimekoTachibana/mscw-market-watcher",  # GitHub repo whose releases are checked
+    "update_check_on_start": True,  # packaged app: look for a newer release when the program starts
     # Item list: OSMS Data Explorer (ids, names, icons), cross-checked against MeowDB.
     "osms_base": "https://osmsdataexplorer.com/data/current",
     "meowdb_url": "https://meowdb.com/msclassic/item-db/all",
