@@ -2,7 +2,11 @@
 
 ## v0.5.7 - 2026-11-05
 Fixes found with the error log from v0.5.6.
-- **Completing the Cloudflare check no longer ends in "HTTP 403".** The check page itself is answered with HTTP
+- **Closing the browser window is no longer logged as "check completed".** The log of v0.5.6 said the check was
+  completed when the window had simply been closed while the check kept asking again. The program now stops with
+  "The browser window was closed before the Cloudflare check was completed" and never treats a closed window as
+  a pass.
+- **A finished Cloudflare check no longer ends in a false "HTTP 403".** The check page itself is answered with HTTP
   403; after you completed it, the program still judged the page by that first answer and stopped, even though the
   check had passed (the log showed "The Cloudflare check was completed" followed by "The site answered HTTP 403").
   It now continues with the page that loads after the check. A real 403 (no check shown) still stops with

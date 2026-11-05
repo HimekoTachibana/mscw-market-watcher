@@ -482,6 +482,17 @@ class BrowserSource:
         for waited in range(limit):
             self._say(f"Waiting for you to complete the check in the browser window ({limit - waited}s left)...")
             time.sleep(1)
+            try:
+                closed = page.is_closed()
+                if not closed:
+                    page.title()  # raises when the window is gone
+            except Exception:
+                closed = True
+            if closed:  # a closed window is not a completed check
+                self._act("The browser window was closed before the Cloudflare check was completed")
+                raise ChallengeDetected("The browser window was closed before the Cloudflare check was completed. "
+                                        "If the check keeps asking again after you click it, the site is not "
+                                        "accepting this automated browser; MesoWatcher does not try to get around that.")
             if not self._is_challenge(page):
                 self._act("The Cloudflare check was completed")
                 return True

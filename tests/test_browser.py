@@ -712,3 +712,21 @@ def test_every_items_result_is_in_the_trail(fsn):
     fsn.fetch()
     t = "\n".join(errorlog.trail())
     assert "Result for 'Shoes Speed Scroll: Chaos': 60 listing(s)" in t and "'For sale now' list: 60 rows" in t
+
+
+def test_closing_the_window_is_not_a_completed_check(src):
+    class Resp:
+        headers = {"cf-mitigated": "challenge"}
+        status = 403
+
+    class ClosedPage:
+        def is_closed(self):
+            return True
+
+        def title(self):
+            raise RuntimeError("Target closed")
+    src.cfg["browser"]["headless"] = False  # window mode: it waits for a person
+    with pytest.raises(core.ChallengeDetected) as e:
+        src._clear_challenge(ClosedPage(), Resp())
+    assert "closed before the Cloudflare check was completed" in str(e.value)
+    assert "was completed\n" not in "\n".join(errorlog.trail()) + "\n"
