@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.6"
+VERSION = "0.5.7"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -281,6 +281,8 @@ class Poller(threading.Thread):
         self._backoff = 0.0
         if hasattr(source, "on_status"):
             source.on_status = on_status  # lets a browser source say "waiting for you..."
+        if hasattr(source, "should_stop"):
+            source.should_stop = self._halt.is_set  # Stop ends a scan after the item being read
 
     def stop(self):
         self._halt.set()

@@ -345,6 +345,7 @@ class BrowserSource:
         self.scroll_info: dict = {}
         self.match_info = ""
         self.forsale_info = ""
+        self.should_stop: Optional[Callable[[], bool]] = None  # the poller says when Stop was pressed
         self._force_visible = False  # set once the window was opened because something went wrong
         self.mode = ""  # "window", "background (off-screen window)" or "background (headless)"
         self._logged: set = set()
@@ -418,7 +419,26 @@ class BrowserSource:
         if channel not in ("", "chromium"):
             kw["channel"] = channel
         try:
-            self._ctx = self._pw.chromium.launch_persistent_context(**kw)
+            try:
+                self._ctx = self._pw.chromium.launch_persistent_context(**kw)
+            except Exception as first:
+                if "Executable doesn't exist" not in str(first):
+                    raise
+                # e.g. "chromium" in the packaged program (no browser is bundled): use one installed on this computer
+                self._act(f"Browser '{channel or 'chromium'}' is not installed; trying the installed ones")
+                self._ctx = None
+                for alt in ("msedge", "chrome"):
+                    if alt == channel:
+                        continue
+                    try:
+                        self._ctx = self._pw.chromium.launch_persistent_context(**{**kw, "channel": alt})
+                        self._act(f"Using '{alt}' instead of '{channel or 'chromium'}'")
+                        self._say(f"'{channel or 'chromium'}' is not installed; using {alt} instead.")
+                        break
+                    except Exception:
+                        continue
+                if self._ctx is None:
+                    raise first
         except Exception as e:
             self.close()
             errorlog.write("The browser could not be started", e, {"browser": channel or "chromium", "mode": self.mode})
@@ -446,11 +466,11 @@ class BrowserSource:
             return False
         return title.startswith("just a moment") or title.startswith("attention required")
 
-    def _clear_challenge(self, page, resp=None):
+    def _clear_challenge(self, page, resp=None) -> bool:
         """If a Cloudflare check is showing: open the browser window (when it was running in the background) and
         wait for YOU to complete it. The program never tries to get past a check by itself."""
         if not self._is_challenge(page, resp):
-            return
+            return False
         self._act("A Cloudflare check is showing")
         if self.background:
             page = self._escalate("A Cloudflare check appeared; complete it in the browser window") or page
@@ -464,7 +484,7 @@ class BrowserSource:
             time.sleep(1)
             if not self._is_challenge(page):
                 self._act("The Cloudflare check was completed")
-                return
+                return True
         raise ChallengeDetected(f"The Cloudflare check was not completed within {limit} s.")
 
     def _escalate(self, reason: str, exc: Optional[BaseException] = None, goto: bool = True):
@@ -524,15 +544,20 @@ class BrowserSource:
     def _goto_start(self, page):
         self._act(f"Loading {self.bc['start_url']}")
         resp = page.goto(self.bc["start_url"], wait_until="domcontentloaded")
-        self._clear_challenge(page, resp)
+        if self._clear_challenge(page, resp):
+            # The check page itself is served with HTTP 403/503. Once the check is completed that first answer is
+            # out of date: judge the page that is showing now, not the answer to the first request.
+            self._act("Check completed; continuing with the page that loaded afterwards")
+            resp = None
+            page = self._page or page
         if resp is not None and resp.status in (429, 503):
             ra = resp.headers.get("retry-after", "")
             raise RateLimited(float(ra) if ra.isdigit() else 60.0)
         if resp is not None and resp.status in (401, 403):
             self._act(f"The site answered HTTP {resp.status}")
             e = ChallengeDetected(
-                f"HTTP {resp.status}: the site refused the request (its bot protection rejected the automated "
-                "browser). MesoWatcher does not try to get around that. Details are in the error log.")
+                f"HTTP {resp.status}: the site refused the request without showing a check. MesoWatcher does not "
+                "try to get around that. Details are in the error log.")
             self._escalate(f"The site refused access (HTTP {resp.status})", e)
             raise e
         try:
@@ -629,6 +654,7 @@ class BrowserSource:
         box.fill(name.strip())
         self._delay(0.6)
         self._clear_challenge(page)
+        self._wait_results(page, want)
         tries = max(int(self.bc.get("max_results_tried") or MAX_RESULTS_TRIED), 1)
         scoped = page.locator(sel) if sel else None
         if scoped is not None and scoped.count() > 0:
@@ -682,6 +708,24 @@ class BrowserSource:
             return None
         return parse_typical(text, used) if text else None
 
+    def _wait_results(self, page, want: str, timeout: float = 8.0):
+        """After typing, the site re-draws the result table (for a moment it can be empty or still show the
+        previous search). Wait until a result whose full name is the wanted one is there; give up quietly after
+        `timeout` seconds (the clicks that follow then report what was really found)."""
+        sel = (self.bc.get("item_selector") or "").strip() or "button.item-select"
+        end = time.time() + timeout
+        n = 0
+        while time.time() < end:
+            try:
+                titles = page.eval_on_selector_all(sel, "els => els.map(e => e.getAttribute('title') || e.innerText || '')")
+            except Exception:
+                titles = []
+            n = len(titles)
+            if any(self._key(t) == want for t in titles):
+                return
+            time.sleep(0.3)
+        self._act(f"No search result named exactly '{want}' appeared within {timeout:.0f} s ({n} result(s) shown)")
+
     def _open_forsale(self, page) -> str:
         """Click the "For sale now" tab at the top of the right-hand panel, which lists every shop selling the
         item. Returns what it opened (e.g. 'For sale now, 102 shops'), or '' when the page has no such tab (older
@@ -698,11 +742,23 @@ class BrowserSource:
             self._act(f"Clicking the '{label}' tab")
             t.click()
             self._delay(0.6)
-        rows = (self.bc.get("row_selector") or "").strip() or "li.buy-row"
-        try:
-            page.wait_for_selector(rows, timeout=5000)
-        except Exception:
-            pass
+        # The Item Info tab has rows of its own, so "some row exists" proves nothing: wait until the For sale now
+        # list is on the page (its own rows, or its footer when the item has no shops) and has drawn its rows.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                st = page.evaluate("() => ({rows: document.querySelectorAll('li.fsn-row').length, "
+                                   "foot: !!document.querySelector('.fsn-foot')})")
+            except Exception:
+                st = {"rows": 0, "foot": False}
+            exp = self._expected(page)
+            want_rows = exp.get("shown") or exp.get("total") or 0
+            if st["rows"] and (not want_rows or st["rows"] >= want_rows or time.time() > deadline - 7):
+                break
+            if st["foot"] and want_rows == 0 and not st["rows"] and time.time() > deadline - 8:
+                break
+            time.sleep(0.4)
+        self._act(f"'{label}' list: {st['rows']} rows on the page")
         n = (self._expected(page).get("total") or 0)
         return f"{label}, {n} shops" if n else label
 
@@ -892,6 +948,7 @@ class BrowserSource:
             self._act(f"Checking '{name}' ({i + 1}/{len(names)})")
             try:
                 ls, note = self._monitor(page, name)
+                self._act(f"Result for '{name}': {len(ls)} listing(s)" + (f" - {note}" if note else ""))
                 out += ls
                 if note:
                     notes.append(f"{name}: {note}")
@@ -899,6 +956,9 @@ class BrowserSource:
                 raise
             except Exception as e:
                 errors.append(f"{name}: {_short(e)}")
+            if self.should_stop and self.should_stop():
+                self._act("Stop was pressed: the scan ends after the item that was being read")
+                break
             if i < len(names) - 1:
                 self._delay()
         if errors and len(errors) == len(names):

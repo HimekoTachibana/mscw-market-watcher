@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.7 - 2026-11-05
+Fixes found with the error log from v0.5.6.
+- **Completing the Cloudflare check no longer ends in "HTTP 403".** The check page itself is answered with HTTP
+  403; after you completed it, the program still judged the page by that first answer and stopped, even though the
+  check had passed (the log showed "The Cloudflare check was completed" followed by "The site answered HTTP 403").
+  It now continues with the page that loads after the check. A real 403 (no check shown) still stops with
+  a message and an error log entry.
+- **Items were skipped right after typing their name.** The site redraws the result table after typing (it is
+  empty or still shows the previous search for a moment) and the program looked too early, so most items of a
+  long Watchlist found no result. It now waits until a result with the exact item name is on the page.
+- **"For sale now" list read as empty** (log: "site says 5" but 0 read): the Item Info tab has rows of its own,
+  which made the program think the For sale now rows were already there. It now waits for the For sale now rows
+  themselves.
+- **Stop ends the scan** after the item being read (it used to go on through the whole Watchlist).
+- **Browser "chromium" is not bundled in the downloaded program** (log: "Executable doesn't exist"). If the chosen
+  browser is not installed, the program now uses Microsoft Edge or Chrome instead and says so.
+- The error log now records, for every item, how many listings were read and why, how many rows the For sale
+  now list had, and when a search result with the exact name did not appear.
+
 ## v0.5.6 - 2026-11-05
 - **Item Name filter in the Live Feed heading** (replaces the Items button of v0.5.5). Click the **▾** at the
   right end of the "Item Name" heading (the rest of the heading still sorts) to open a drop-down list of items

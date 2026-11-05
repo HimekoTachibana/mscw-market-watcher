@@ -215,7 +215,8 @@ function draw(){
     ul.onwheel=()=>{ if(shown<all.length){ ul.insertAdjacentHTML('beforeend',all.slice(shown,shown+12).map(li).join('')); shown=Math.min(shown+12,all.length);
       document.getElementById('cnt').textContent=shown+' of '+TOTAL+' shops shown'; } };}
 }
-document.getElementById('search').oninput=e=>table();
+document.getElementById('search').oninput=e=>{
+  if (Q.get('slow')) { document.getElementById('rows').innerHTML=''; setTimeout(table,1500); } else table(); };
 table();
 </script></body></html>"""
 
@@ -227,6 +228,16 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/pass403"):  # like Cloudflare: the check page is answered with 403, then the site loads
+            body = (b"<!doctype html><title>Just a moment...</title><p>Checking</p>"
+                    b"<script>setTimeout(()=>{location.href='/fsn'},1500)</script>")
+            self.send_response(403)
+            self.send_header("cf-mitigated", "challenge")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         page = next((p for k, p in PAGES.items() if self.path.startswith(k)), None) or (
             CHALLENGE if self.path.startswith("/challenge") else MOCK_REAL if self.path.startswith("/real") else MOCK)
         body = page.encode()
@@ -673,3 +684,31 @@ def test_window_opens_by_itself_when_a_check_needs_a_person(src, site):
         src.fetch()  # nobody completes the check
     assert src.mode == "window" and not src.background
     assert "Opening the browser window for you" in "\n".join(errorlog.trail())
+
+
+@needs_screen
+def test_completed_check_is_not_mistaken_for_a_refusal(fsn, site):
+    """The check page itself is answered with HTTP 403. After it was completed (here: the page moves on to the
+    real site by itself) the old 403 must not stop the scan."""
+    fsn.cfg["browser"].update(start_url=site + "/pass403", headless=False, challenge_wait_s=10)
+    ls = fsn.fetch()
+    assert len(ls) == 60
+    assert "Check completed" in "\n".join(errorlog.trail())
+
+
+def test_waits_for_the_search_results_to_be_redrawn(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?slow=1")  # the result table is empty for 1.5 s after typing
+    assert len(fsn.fetch()) == 60
+
+
+def test_stop_ends_the_scan_after_the_item_being_read(fsn):
+    fsn.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None},
+                            {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    fsn.should_stop = lambda: True
+    assert len(fsn.fetch()) == 60  # not 120
+
+
+def test_every_items_result_is_in_the_trail(fsn):
+    fsn.fetch()
+    t = "\n".join(errorlog.trail())
+    assert "Result for 'Shoes Speed Scroll: Chaos': 60 listing(s)" in t and "'For sale now' list: 60 rows" in t
