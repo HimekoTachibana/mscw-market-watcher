@@ -913,8 +913,10 @@ class App(tk.Tk):
         ttk.Label(f1, foreground="#555", text="How far back to look is set in the main window (Watchlist > "
                                               "Show listings from the last).").pack(anchor="w", pady=(6, 0))
         g_max = field(f1, "Safety cap: most listings read per item", bc["listing_cap"], width=10)
+        g_tries = field(f1, "Search results to try (clicked one by one until the right-hand panel shows the item)",
+                        bc.get("max_results_tried", browser.MAX_RESULTS_TRIED), width=10)
         adv = {k: bc[k] for k in ("filter_placeholder", "item_selector", "row_selector", "newest_label",
-                                  "open_labels", "page_timeout_ms", "challenge_wait_s")}
+                                  "forsale_label", "open_labels", "page_timeout_ms", "challenge_wait_s")}
         g_adv = field(f1, "Advanced: text the site shows (change only if the site changes), JSON",
                       json.dumps(adv, indent=1), 7)
         first = self.watch.entries[0]["name"] if self.watch.entries else "Selective 5-slot Coupon"
@@ -952,6 +954,7 @@ class App(tk.Tk):
                 dmin = max(int(g_dmin()), 500)
                 dmax = max(int(g_dmax()), dmin)
                 mx = max(int(g_max()), 1)
+                tries = max(int(g_tries()), 1)
                 keep_h = float(g_keep().strip() or 0)
                 if keep_h < 0:
                     raise ValueError("Delete listings older than: enter hours, 0 or more")
@@ -963,7 +966,7 @@ class App(tk.Tk):
                 return False
             bc.update(extra)
             bc.update(start_url=g_start().strip(), channel=g_chan.get(), headless=not show_win.get(),
-                      listing_cap=mx)
+                      listing_cap=mx, max_results_tried=tries)
             self.cfg["delay_min_ms"], self.cfg["delay_max_ms"] = dmin, dmax
             self.cfg["osms_base"] = g_osms().strip()
             self.cfg["meowdb_url"] = g_meow().strip()

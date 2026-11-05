@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -68,6 +68,8 @@ DEFAULT_CONFIG = {
         "item_selector": "button.item-select",  # item buttons in the table (blank = match by visible text)
         "row_selector": "li.buy-row",  # one listing in the Newest list (blank = find rows by their "each" label)
         "newest_label": "Newest",
+        "forsale_label": "For sale now",  # tab (top of the right-hand panel) that lists every shop selling the item
+        "max_results_tried": 6,  # search results clicked one after the other to find the item before giving up
         "open_labels": ["Where to buy", "For sale now"],
     },
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it

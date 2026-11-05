@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.5.2 - 2026-11-05
+- **New way to find and open an item.** The program types the item name, then clicks the search results one by
+  one (top to bottom) and stops at the first one whose right-hand panel shows the same item name. The icon is
+  used as a second check: the picture in the panel must be the same one as on the clicked result (and the
+  item's own icon when the item list knows it). A result that opens something else is skipped.
+- **Settings > General > Search results to try** (default **6**, was 12): how many results are clicked before
+  giving up on an item.
+- After a match the program clicks the **For sale now** tab at the top right of the panel (the number next to it
+  changes with the number of shops) and reads the listings there, newest first. The tab name can be changed in
+  Settings > Advanced (`forsale_label`).
+- That list already has every shop on the page, so the program reads them all at once and only scrolls when
+  the page says it shows fewer shops than it has. When it does scroll, it hovers the list and rolls the mouse
+  wheel over it, as a person would.
+- Rows in the For sale now list show the price without the word "each"; they are now read correctly (exact
+  price from the tooltip when there is one).
+- Settings > Test now says which tab was clicked, how many shops the site reports and how many were read.
+
 ## v0.5.1 - 2026-11-04
 - **Clear Live Feed** button (top right, next to Settings) deletes every listing after a confirmation. The
   same shops, still on the site, are not added again on the next pass; new listings appear as usual.

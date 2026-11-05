@@ -164,7 +164,61 @@ MOCK_SLOW = MOCK_REAL.replace(_LOADER, """let busy=false; ul.onscroll=()=>{ if(!
 MOCK_WHEEL = MOCK_REAL.replace(_LOADER, _LOADER.replace("ul.onscroll=", "ul.onwheel="))  # only a mouse wheel loads more
 MOCK_BUTTON = MOCK_REAL.replace(_LOADER, """const more=document.createElement('button'); more.textContent='Load more'; more.className='more';
   ul.after(more); more.onclick=()=>{ ul.insertAdjacentHTML('beforeend', rows.slice(shown,shown+12).map(li).join('')); shown+=12; };""")
-PAGES = {"/real-slow": MOCK_SLOW, "/real-wheel": MOCK_WHEEL, "/real-button": MOCK_BUTTON, "/scrolls": MOCK_SCROLLS}
+
+# The layout of the real page as saved in a snapshot: results show a SHORTENED name (the full one is in the title),
+# every result has an icon; the right-hand panel opens on "Item Info" and the "For sale now" tab (data-tab="now")
+# lists every shop in a scrolling box, with all rows already in the page and a "N of N shops shown" footer.
+MOCK_FSN = """<!doctype html><html><head><meta charset="utf-8"><title>MesoWatch fsn mock</title></head><body>
+<input id="search" type="search" placeholder="Filter items\\u2026">
+<table><tbody id="rows"></tbody></table>
+<section id="detail"><div class="tabs"><button data-mu="fsn-tab" data-tab="info" class="on" aria-selected="true">Item Info</button>
+<button data-mu="fsn-tab" data-tab="now" aria-selected="false">For sale now<b class="fsn-count">60</b></button></div><div id="body"></div></section>
+<script>
+const Q = new URLSearchParams(location.search);
+const DECOYS = +(Q.get('decoys')||0), MODE = Q.get('mode')||'', LAZY = MODE==='lazy', TOTAL = 60;
+const WANT = "Shoes Speed Scroll: Chaos";
+const ITEMS = [];
+for (let k=0;k<DECOYS;k++) ITEMS.push({title:"Shoes Speed Scroll: Decoy "+k, icon:"0204"+String(100+k).padStart(4,'0'), panelIcon:null});
+if (MODE==='iconmismatch') ITEMS.push({title:WANT, icon:"02040001", panelIcon:"02040009"});  // right name, different icon
+ITEMS.push({title:WANT, icon:"02040000", panelIcon:null});
+let cur=null, tab='info', shown=0;
+const rowsFor = () => Array.from({length:TOTAL},(_,i)=>({s:"Fsn"+i, ch:1+i%9, fm:1+i%5, p:150000+i, min:(i+1)*2}));
+function table(){
+  document.getElementById('rows').innerHTML = ITEMS.map((it,i)=>
+   `<tr><td><div class="item-cell"><div class="item-icon"><img src="data/icons/${it.icon}.png" alt=""></div>
+    <div class="item-text"><button class="item-name item-select" data-i="${i}" title="${it.title}">Shoes Speed Scroll</button></div></div></td>
+    <td data-col="price"><span class="meso" title="140,000 mesos">140K</span></td></tr>`).join('');
+  document.querySelectorAll('button.item-select').forEach(b=>b.onclick=()=>{cur=ITEMS[+b.dataset.i];tab='info';draw();});
+}
+const li = r => `<li class="buy-row fsn-row up can-open"><div class="buy-main"><div class="buy-seller">${r.s}</div>
+  <div class="buy-meta"><span class="buy-where tag-map" title="Free Market ${r.fm}">FM${r.fm}</span><span class="ch-chip tag-ch">CH ${r.ch}</span>
+  <span class="buy-when">&nbsp;\\u00b7 ${r.min<60?r.min+'m':Math.floor(r.min/60)+'h'} ago</span></div></div>
+  <div class="fsn-right"><div class="buy-price"><span class="meso" title="${r.p.toLocaleString('en-US')} mesos">${Math.round(r.p/1000)}K</span></div></div></li>`;
+function draw(){
+  document.querySelectorAll('[data-mu=fsn-tab]').forEach(b=>{const on=b.dataset.tab===tab;b.className=on?'on':'';b.setAttribute('aria-selected',on);
+    b.onclick=()=>{tab=b.dataset.tab;draw();};});
+  const body=document.getElementById('body');
+  if(!cur){body.innerHTML='';return;}
+  const head=`<div class="detail-head"><div class="item-icon"><img src="data/icons/${cur.panelIcon||cur.icon}.png" alt=""></div>
+    <div><h2>${cur.title}</h2><p class="detail-sub">91 listings</p></div></div>`;
+  if(tab==='info'){
+    body.innerHTML=head+`<ul class="buy-list"><li class="buy-row"><div class="buy-main"><div class="buy-seller">InfoTabShop</div>
+      <div class="buy-meta"><span>CH 1</span><span>FM1</span><span>&nbsp;\\u00b7 5m ago</span></div></div><div class="buy-price"><span class="meso" title="1 mesos">1</span><small>each</small></div></li></ul>`;
+    return;
+  }
+  const all=rowsFor(); shown=LAZY?12:all.length;
+  body.innerHTML=head+`<div class="fsn-view"><span class="fsn-seg"><button class="on" data-fsn-sort="new">Newest</button><button data-fsn-sort="cheap">Cheapest</button></span>
+    <ul class="buy-list fsn-list" style="height:240px;overflow-y:auto"><li class="buy-row list-shop-row"><div class="buy-seller">Your shop here</div><div class="buy-meta">CH ? FM ?</div></li>${all.slice(0,shown).map(li).join('')}</ul>
+    <div class="fsn-foot"><span id="cnt">${shown} of ${LAZY?TOTAL:shown} shops shown</span></div></div>`;
+  if(LAZY){const ul=document.querySelector('ul.fsn-list');
+    ul.onwheel=()=>{ if(shown<all.length){ ul.insertAdjacentHTML('beforeend',all.slice(shown,shown+12).map(li).join('')); shown=Math.min(shown+12,all.length);
+      document.getElementById('cnt').textContent=shown+' of '+TOTAL+' shops shown'; } };}
+}
+document.getElementById('search').oninput=e=>table();
+table();
+</script></body></html>"""
+
+PAGES = {"/fsn": MOCK_FSN, "/real-slow": MOCK_SLOW, "/real-wheel": MOCK_WHEEL, "/real-button": MOCK_BUTTON, "/scrolls": MOCK_SCROLLS}
 
 
 class H(BaseHTTPRequestHandler):
@@ -511,3 +565,62 @@ def test_nothing_matching_records_nothing_and_says_what_the_panel_showed(src, si
     assert "none of the 2 search results opened this item" in src.note and "Something Else Entirely" in src.note
     log = "\n".join(src.diagnose("Shoes Speed Scroll: Chaos"))
     assert "FAIL Opened 2 search result(s)" in log and "never showed 'Shoes Speed Scroll: Chaos'" in log
+
+
+
+# ---- "For sale now" tab layout (from the real page's snapshot)
+@pytest.fixture()
+def fsn(src, site):
+    src.cfg["browser"].update(start_url=site + "/fsn")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    return src
+
+
+def test_for_sale_now_tab_is_clicked_and_every_listing_is_read_without_scrolling(fsn):
+    ls = fsn.fetch()
+    assert len(ls) == 60 and fsn.note == ""
+    assert {l.seller for l in ls} == {f"Fsn{i}" for i in range(60)}  # not the Item Info tab's shop
+    assert fsn.forsale_info.startswith("For sale now")
+    si = fsn.scroll_info
+    assert si["steps"] == 0 and si["expected"] == 60 and "already on the page" in si["stop"]
+
+
+def test_hovering_the_list_and_rolling_the_wheel_loads_the_rest(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?mode=lazy")
+    ls = fsn.fetch()
+    assert len(ls) == 60  # the page only had 12 rows; the wheel over the list loaded the others
+    assert fsn.scroll_info["expected"] == 60 and fsn.scroll_info["steps"] > 0
+
+
+def test_results_are_clicked_one_by_one_up_to_the_limit(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?decoys=6")  # the right item is the 7th result
+    assert fsn.fetch() == [] and "none of the 6 search results" in fsn.note
+    assert fsn.cfg["browser"]["max_results_tried"] == 6  # the default
+    fsn.cfg["browser"]["max_results_tried"] = 7
+    assert len(fsn.fetch()) == 60 and len(fsn.last_panels) == 6  # six decoys opened and rejected, the 7th matched
+
+
+def test_limit_is_editable_in_the_saved_settings(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?decoys=2", max_results_tried=2)
+    assert fsn.fetch() == []  # right item would be 3rd
+    fsn.cfg["browser"]["max_results_tried"] = 3
+    assert len(fsn.fetch()) == 60
+
+
+def test_icon_of_the_clicked_result_must_equal_the_panel_icon(fsn, site):
+    fsn.cfg["browser"].update(start_url=site + "/fsn?mode=iconmismatch")  # 1st result: right name, panel shows another icon
+    ls = fsn.fetch()
+    assert len(ls) == 60
+    assert fsn.last_panels and "wrong icon" in fsn.last_panels[0]
+    assert fsn.match_info == "name and icon match the clicked result"
+
+
+def test_diagnose_reports_the_for_sale_tab(fsn):
+    log = "\n".join(fsn.diagnose("Shoes Speed Scroll: Chaos"))
+    assert "Clicked the 'For sale now, 60 shops' tab" in log and "site says 60" in log
+
+
+def test_old_layout_without_the_tab_still_works(src, site):
+    src.cfg["browser"].update(start_url=site + "/real")
+    src.cfg["watchlist"] = [{"name": "Piece of Ice", "max_price": None}]
+    assert [l.seller for l in src.fetch()] == ["Iceman"] and src.forsale_info == ""

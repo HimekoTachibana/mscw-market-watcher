@@ -30,13 +30,14 @@ _AGO_RE = re.compile(r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|
 _CH_RE = re.compile(r"(?<![A-Za-z])CH\s*\.?\s*(\d+)(?!\d)", re.I)
 _FM_RE = re.compile(r"(?<![A-Za-z])FM\s*(\d+)(?!\d)", re.I)
 _PRICE_RE = re.compile(r"(\d[\d.,]*\s*[KMB]?)\s*each\b", re.I)
+_BARE_PRICE_RE = re.compile(r"(?m)^[ \t]*(\d[\d.,]*[ \t]*[KMB]?)[ \t]*$", re.I)  # "For sale now" rows: the price alone on a line
 _TYPICAL_RE = re.compile(r"^\d[\d.,]*\s*[KMB]?$", re.I)
 _SEEN_RE = re.compile(r"seen\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s+(\d{1,2}):(\d{2})\s*([AP]M)", re.I)
 _MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 _MESOS_TITLE_RE = re.compile(r"^\s*([\d,]+)\s*mesos\s*$", re.I)  # tooltip: "44,999 mesos"
 
 RELOAD_EVERY = 10  # full page reload every N cycles, to recover from a stale page
-MAX_RESULTS_TRIED = 12  # most search results opened (one after the other) to find the item
+MAX_RESULTS_TRIED = 6  # default for "most search results opened, one after the other, to find the item" (Settings)
 _ICON_ID_RE = re.compile(r"(?<!\d)(\d{5,9})(?!\d)")
 
 
@@ -89,6 +90,9 @@ def parse_listing_text(text: str, titles=(), now: Optional[datetime] = None) -> 
     """One row of the Newest list (its visible text) -> fields, or None if it isn't a listing."""
     t = text.replace("\u00a0", " ").replace("·", " ").replace("•", " ")  # the site puts &nbsp; before the time
     pm = _PRICE_RE.search(t)
+    if not pm:  # the "For sale now" rows show the price alone ("167K", exact value in the tooltip), no "each"
+        bare = list(_BARE_PRICE_RE.finditer(t))
+        pm = bare[-1] if bare else None  # the price comes after the seller and the badges
     if not pm:
         return None
     price = parse_number(pm.group(1).replace(" ", ""))
@@ -250,6 +254,32 @@ _DETAIL_JS = r"""
 }
 """
 
+# The icon of a search result (the item table row around the clicked name), so the right-hand panel's icon can be
+# compared with it: the very same picture must show up on the right.
+_RESULT_ICON_JS = r"""
+(el) => {
+  const row = el.closest('tr, li, .item-cell, [class*="row"]') || el.parentElement;
+  const img = row && row.querySelector('img, image, [style*="background"]');
+  if (!img) return '';
+  if (img.tagName.toLowerCase() === 'img') return img.currentSrc || img.getAttribute('src') || '';
+  const bg = getComputedStyle(img).backgroundImage;
+  const m = bg && /url\(["']?([^"')]+)["']?\)/.exec(bg);
+  return m ? m[1] : (img.getAttribute('href') || '');
+}
+"""
+
+# How many shops the "For sale now" view says it has, and how many it shows ("102 of 102 shops shown").
+_EXPECT_JS = r"""
+() => {
+  const num = t => parseInt(String(t || '').replace(/\D/g, ''), 10) || null;
+  const foot = document.querySelector('.fsn-foot');
+  const m = foot && /(\d[\d,]*)\s+of\s+(\d[\d,]*)\s+(?:shops|listings)/i.exec(foot.innerText || '');
+  if (m) return {shown: num(m[1]), total: num(m[2])};
+  const c = document.querySelector('.fsn-count');
+  return {shown: null, total: c ? num(c.textContent) : null};
+}
+"""
+
 _READ_PRICE_CELL_JS = r"""
 (needle) => {
   const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -309,6 +339,7 @@ class BrowserSource:
         self._cycles = 0
         self.scroll_info: dict = {}
         self.match_info = ""
+        self.forsale_info = ""
 
     # ---- helpers
     @property
@@ -449,19 +480,31 @@ class BrowserSource:
         except Exception:
             return []
 
-    def _panel_matches(self, page, want: str) -> tuple[bool, str]:
-        """Is the item shown in the right-hand panel the wanted one? Needs the heading to read exactly
-        like the wanted name and, when the icon can be compared, the icon to be that item's too."""
+    def _panel_matches(self, page, want: str, row_ids: Optional[list] = None) -> tuple[bool, str]:
+        """Is the item shown in the right-hand panel the wanted one? Needs the heading to read exactly like the
+        wanted name and, as a double check, the icon to be right: the same picture as the search result that was
+        clicked, and (when the item database knows the id) that item's own icon."""
         heads = self._panel_heads(page)
         shown = self._shown(heads)
         for h in heads:
             if self._key(h["text"]) != want:
                 continue
-            verdict = self._icon_verdict(h.get("icon"), want)
-            if verdict is False:
+            icon = h.get("icon")
+            panel_ids = icon_ids(icon.get("src", "")) if icon else []
+            if row_ids and panel_ids:
+                if not set(row_ids) & set(panel_ids):
+                    self.match_info = "name matched but the icon differs from the clicked result's icon"
+                    return False, f"{h['text']} (wrong icon)"
+                verdict, how = True, "name and icon match the clicked result"
+            else:
+                verdict, how = None, "name matches (icon cannot be compared)"
+            db = self._icon_verdict(icon, want)
+            if db is False:
                 self.match_info = "name matched but the icon belongs to another item"
                 return False, f"{h['text']} (wrong icon)"
-            self.match_info = {True: "name and icon match", None: "name matches (icon cannot be compared)"}[verdict]
+            if db is True:
+                how = "name and icon match"
+            self.match_info = how
             return True, shown
         return False, shown
 
@@ -477,23 +520,30 @@ class BrowserSource:
         box.fill(name.strip())
         self._delay(0.6)
         self._clear_challenge(page)
+        tries = max(int(self.bc.get("max_results_tried") or MAX_RESULTS_TRIED), 1)
         scoped = page.locator(sel) if sel else None
         if scoped is not None and scoped.count() > 0:
             pool = scoped
         else:  # selector missing from the page (layout changed): fall back to visible text
             pool = page.get_by_text(re.compile(re.escape(name.strip()), re.I))
-        texts = [t.strip() for t in pool.all_inner_texts()]
+        try:  # the full name is in the button's title (the button text can be shortened)
+            texts = [(t or "").strip() for t in pool.evaluate_all(
+                "els => els.map(e => e.getAttribute('title') || e.innerText || '')")]
+        except Exception:
+            texts = [t.strip() for t in pool.all_inner_texts()]
         self.last_candidates = [t for t in texts if t][:5]
-        # a result whose text already equals the name is the likeliest, so it is tried first; every result is verified
-        order = [i for i, t in enumerate(texts) if self._key(t) == want] + \
-                [i for i, t in enumerate(texts) if self._key(t) != want]
-        for i in order[:MAX_RESULTS_TRIED]:
+        # the results are clicked one by one, top to bottom, until the right-hand panel shows the wanted item
+        for i in range(min(len(texts), tries)):
             before = self._shown(self._panel_heads(page))
+            try:
+                row_ids = icon_ids(pool.nth(i).evaluate(_RESULT_ICON_JS))
+            except Exception:
+                row_ids = []
             pool.nth(i).click()
             self._delay(0.3)  # the usual random pause after a click
             t0 = time.time()
             while True:  # the panel may take a moment to show the clicked item
-                ok, shown = self._panel_matches(page, want)
+                ok, shown = self._panel_matches(page, want, row_ids)
                 if ok or shown != before or time.time() - t0 > 2.0:
                     break  # matched, or the panel now shows something else, or we waited long enough
                 time.sleep(0.25)
@@ -521,6 +571,35 @@ class BrowserSource:
         except Exception:
             return None
         return parse_typical(text, used) if text else None
+
+    def _open_forsale(self, page) -> str:
+        """Click the "For sale now" tab at the top of the right-hand panel, which lists every shop selling the
+        item. Returns what it opened (e.g. 'For sale now, 102 shops'), or '' when the page has no such tab (older
+        layout: the Where to buy / Newest buttons are used instead)."""
+        label = (self.bc.get("forsale_label") or "For sale now").strip()
+        tab = page.locator('[data-mu="fsn-tab"][data-tab="now"]')
+        if tab.count() == 0:
+            tab = page.locator('button, [role="tab"]').filter(has_text=re.compile(r"^\s*" + re.escape(label) + r"\b", re.I))
+        if tab.count() == 0 or not tab.first.is_visible():
+            return ""
+        t = tab.first
+        on = (t.get_attribute("aria-selected") == "true") or ("on" in (t.get_attribute("class") or "").split())
+        if not on:
+            t.click()
+            self._delay(0.6)
+        rows = (self.bc.get("row_selector") or "").strip() or "li.buy-row"
+        try:
+            page.wait_for_selector(rows, timeout=5000)
+        except Exception:
+            pass
+        n = (self._expected(page).get("total") or 0)
+        return f"{label}, {n} shops" if n else label
+
+    def _expected(self, page) -> dict:
+        try:
+            return page.evaluate(_EXPECT_JS) or {}
+        except Exception:
+            return {}
 
     def _open_newest(self, page) -> bool:
         label = self.bc["newest_label"]
@@ -582,16 +661,17 @@ class BrowserSource:
         max_steps = max(int(self.bc.get("max_scrolls", 40)), 40) * 4
         out: list[dict] = []
         seen: set = set()
-        info = {"steps": 0, "loads": 0, "rows": 0, "container": "", "stop": ""}
+        info = {"steps": 0, "loads": 0, "rows": 0, "container": "", "stop": "", "expected": 0}
         self.scroll_info = info
         stalls = 0
         for step in range(max_steps + 1):
-            reached_old, total = False, 0
+            reached_old, total, parsed = False, 0, 0
             for r in page.evaluate(_READ_ROWS_JS, sel):
                 total += 1
                 p = parse_listing_text(r["text"], r.get("titles") or ())
                 if not p:
                     continue
+                parsed += 1
                 if p["age_min"] is None or p["age_min"] > lookback:
                     reached_old = True  # the list is newest-first, so everything below is older
                     continue
@@ -605,6 +685,12 @@ class BrowserSource:
                 break
             if len(out) >= cap:
                 info["stop"] = "reached the safety cap"
+                break
+            if step == 0:
+                exp = self._expected(page)
+                info["expected"] = exp.get("total") or exp.get("shown") or 0
+            if info["expected"] and parsed >= info["expected"]:
+                info["stop"] = f"all {parsed} listings were already on the page (no scrolling needed)"
                 break
             if step == max_steps:
                 info["stop"] = "reached the scroll limit"
@@ -646,7 +732,9 @@ class BrowserSource:
             return [], (f"none of the {len(self.last_panels)} search results opened this item "
                         f"(the right-hand panel showed: {shown})")
         typical = self._typical(page, used)
-        if not self._open_newest(page):
+        forsale = self._open_forsale(page)
+        self.forsale_info = forsale
+        if not self._open_newest(page) and not forsale:
             return [], "could not open the Newest list"
         out = []
         for p in self._read_rows(page):
@@ -716,14 +804,19 @@ class BrowserSource:
             typ = self._typical(page, used)
             log.append(f"{'OK ' if typ else 'WARN'} Typical price: {typ:,.0f}" if typ
                        else "WARN Typical price not found (Discount column will be blank)")
-            if not self._open_newest(page):
+            forsale = self._open_forsale(page)
+            if forsale:
+                log.append(f"OK  Clicked the '{forsale}' tab")
+            else:
+                log.append(f"WARN No '{self.bc.get('forsale_label') or 'For sale now'}' tab found; using the older Where to buy / Newest buttons")
+            if not self._open_newest(page) and not forsale:
                 log.append(f"FAIL Could not find the '{self.bc['newest_label']}' button/list.")
                 return log
             log.append(f"OK  '{self.bc['newest_label']}' list open")
             rows = self._read_rows(page)
             si = self.scroll_info
             log.append(f"OK  Scrolled the Newest list {si.get('steps', 0)} time(s) in '{si.get('container') or '?'}': "
-                       f"{si.get('rows', 0)} rows seen, {si.get('loads', 0)} time(s) the site loaded more; "
+                       f"{si.get('rows', 0)} rows seen (site says {si.get('expected') or '?'}), {si.get('loads', 0)} time(s) the site loaded more; "
                        f"stopped because {si.get('stop') or '?'}")
             look = int(self.bc.get("lookback_min", 180))
             if rows:
