@@ -17,7 +17,7 @@ try:
 except ImportError:  # icons are optional
     Image = ImageTk = None
 
-from . import browser, core, updater
+from . import browser, core, errorlog, updater
 
 COLS = [("item", "Item Name", 230), ("seller", "Seller", 110), ("channel", "Channel", 65),
         ("location", "Location", 170), ("price", "Price", 90), ("target", "Target Price", 95),
@@ -318,9 +318,6 @@ class App(tk.Tk):
         self.only_loc = tk.BooleanVar(value=self.cfg["only_with_location"])
         ttk.Checkbutton(top, text="Only listings with Channel and Location", variable=self.only_loc,
                         command=self._render).pack(side="left")
-        self.items_btn = ttk.Button(top, command=self.choose_feed_items)
-        self.items_btn.pack(side="left", padx=12)
-        self._items_label()
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="Clear Live Feed", command=self.clear_feed).pack(side="right", padx=6)
 
@@ -458,6 +455,8 @@ class App(tk.Tk):
         sort = self.cfg["feed_sort"]
         titles = {c[0]: c[1] for c in COLS}
         titles["#0"] = "Sold"
+        n = len(self.cfg["feed_items"])
+        titles["item"] = titles.get("item", "Item Name") + (f" \u25be ({n})" if n else " \u25be")  # \u25be = drop-down
         for cid, t in titles.items():
             arrow = (" ▼" if sort.get("desc") else " ▲") if sort.get("col") == ("sold" if cid == "#0" else cid) else ""
             self.tree.heading(cid, text=t + arrow)
@@ -491,6 +490,9 @@ class App(tk.Tk):
         if not d:
             return
         if not d["moved"]:
+            if d["col"] == "item" and e.x - self._col_left("item") > int(self.tree.column("item", "width")) - 70:
+                self.choose_feed_items()  # the drop-down arrow end of the heading; the rest of it sorts
+                return
             self.sort_by("sold" if d["col"] == "#0" else d["col"])
             return
         target = self._col_at(e.x)
@@ -657,54 +659,104 @@ class App(tk.Tk):
         self._render()
 
     # ------------------------------------------------------------ actions
-    def _items_label(self):
-        n = len(self.cfg["feed_items"])
-        self.items_btn.config(text="Items: all" if not n else f"Items: {n} chosen")
-
-    def choose_feed_items(self):
-        """Pick which items the Live Feed shows (tick one or several; nothing ticked = every item)."""
+    def _feed_item_names(self) -> list[str]:
         names = {l.item_name for l in self.listings} | {e["name"] for e in self.watch.entries if e.get("name")} \
             | set(self.cfg["feed_items"])
-        names = sorted(names, key=str.lower)
-        w = tk.Toplevel(self)
-        w.title("Live Feed - choose items")
+        return sorted(names, key=str.lower)
+
+    def choose_feed_items(self):
+        """The Item Name column's drop-down: tick the items the Live Feed shows. It applies at once. The box on
+        top narrows the list, 'Select all' ticks every item in it, 'Deselect all' clears the ticks (= show every
+        item again)."""
+        old = getattr(self, "_item_filter_win", None)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        errorlog.action("Opened the Item Name filter")
+        w = self._item_filter_win = tk.Toplevel(self)
+        w.title("Item Name filter")
         w.transient(self)
-        w.geometry("380x420")
-        ttk.Label(w, padding=8, wraplength=350, text="Tick the items to show in the Live Feed. "
-                  "Nothing ticked shows every item.").pack(anchor="w")
-        box = ttk.Frame(w)
-        box.pack(fill="both", expand=True, padx=8)
-        cv = tk.Canvas(box, highlightthickness=0)
-        sb = ttk.Scrollbar(box, orient="vertical", command=cv.yview)
-        inner = ttk.Frame(cv)
-        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
-        cv.create_window((0, 0), window=inner, anchor="nw")
-        cv.configure(yscrollcommand=sb.set)
-        cv.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        try:
+            x = self.tree.winfo_rootx() + self._col_left("item")
+            w.geometry(f"340x460+{x}+{self.tree.winfo_rooty() + 24}")
+        except tk.TclError:
+            w.geometry("340x460")
+        names = self._feed_item_names()
         chosen = {n.lower() for n in self.cfg["feed_items"]}
-        vars_ = {n: tk.BooleanVar(value=n.lower() in chosen) for n in names}
-        for n in names:
-            ttk.Checkbutton(inner, text=n, variable=vars_[n]).pack(anchor="w")
-        if not names:
-            ttk.Label(inner, text="No items yet - add items to the Watchlist or wait for listings.").pack(anchor="w")
+        q = tk.StringVar()
+        top = ttk.Frame(w, padding=(8, 8, 8, 2))
+        top.pack(fill="x")
+        ttk.Label(top, text="Search:").pack(side="left")
+        ent = ttk.Entry(top, textvariable=q)
+        ent.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        info = tk.StringVar()
+        ttk.Label(w, textvariable=info, foreground="#555", padding=(8, 0)).pack(anchor="w")
+        box = ttk.Frame(w, padding=8)
+        box.pack(fill="both", expand=True)
+        lb = tk.Listbox(box, activestyle="none", exportselection=False, selectmode="browse")
+        sb = ttk.Scrollbar(box, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        shown: list[str] = []
+
+        def draw():
+            nonlocal shown
+            needle = q.get().strip().lower()
+            shown = [n for n in names if needle in n.lower()]
+            top_y = lb.yview()[0]
+            lb.delete(0, "end")
+            for n in shown:
+                lb.insert("end", ("\u2611  " if n.lower() in chosen else "\u2610  ") + n)
+            lb.yview_moveto(top_y)
+            k = len(chosen)
+            info.set("Showing every item" if not k else f"Showing only the {k} ticked item(s)")
+
+        def apply():
+            self.cfg["feed_items"] = [n for n in names if n.lower() in chosen]
+            self.cfg.save()
+            self._update_headings()
+            self._render()
+
+        def toggle(_e=None, key=False):
+            sel = (lb.curselection() or [None])[0] if key else lb.nearest(_e.y)
+            if sel is None or not (0 <= sel < len(shown)):
+                return
+            k = shown[sel].lower()
+            chosen.symmetric_difference_update({k})
+            draw()
+            apply()
+            return "break"
+
+        def select_all():
+            chosen.update(n.lower() for n in shown)
+            draw()
+            apply()
+
+        def deselect_all():
+            chosen.clear()
+            draw()
+            apply()
+        lb.bind("<ButtonRelease-1>", toggle)
+        lb.bind("<space>", lambda e: toggle(e, key=True))
+        q.trace_add("write", lambda *_: draw())
         bar = ttk.Frame(w, padding=8)
         bar.pack(fill="x")
+        ttk.Button(bar, text="Select all", command=select_all).pack(side="left")
+        ttk.Button(bar, text="Deselect all (reset)", command=deselect_all).pack(side="left", padx=6)
+        ttk.Button(bar, text="Close", command=w.destroy).pack(side="right")
+        w.bind("<Escape>", lambda e: w.destroy())
+        draw()
+        ent.focus_set()
 
-        def setall(v):
-            for b in vars_.values():
-                b.set(v)
-
-        def ok():
-            self.cfg["feed_items"] = [n for n in names if vars_[n].get()]
-            self.cfg.save()
-            self._items_label()
-            self._render()
-            w.destroy()
-        ttk.Button(bar, text="Tick all", command=lambda: setall(True)).pack(side="left")
-        ttk.Button(bar, text="Clear ticks", command=lambda: setall(False)).pack(side="left", padx=6)
-        ttk.Button(bar, text="Cancel", command=w.destroy).pack(side="right")
-        ttk.Button(bar, text="OK", command=ok).pack(side="right", padx=6)
+    def _col_left(self, cid: str) -> int:
+        """x of a column's left edge inside the Live Feed table."""
+        x = int(self.tree.column("#0", "width"))
+        for c in self._display_cols():
+            if c == cid:
+                return x
+            x += int(self.tree.column(c, "width"))
+        return x
 
     def clear_feed(self):
         """Delete every listing from the Live Feed. The same shops, still on the site, are not added
@@ -713,6 +765,7 @@ class App(tk.Tk):
                 "Clear Live Feed", f"Delete all {len(self.listings)} listings from the Live Feed?\n\n"
                 "The same shops will not be added again; new listings will appear as usual."):
             return
+        errorlog.action(f"Cleared the Live Feed ({len(self.listings)} listings)")
         self.cfg["feed_dismissed"] = core.dismiss_all(self.listings, self.cfg["feed_dismissed"])
         self.listings = []
         self.cfg["sold"] = []  # their rows are gone
@@ -769,6 +822,7 @@ class App(tk.Tk):
 
     def toggle(self):
         if self.poller and self.poller.is_alive():
+            errorlog.action("Pressed Stop")
             self.poller.stop()
             self.poller = None
             self.btn.config(text="Start")
@@ -777,6 +831,10 @@ class App(tk.Tk):
         if self._last_poller and self._last_poller.is_alive():
             self.status.set("Still closing the previous browser - try again in a few seconds.")
             return
+        if getattr(self, "_test_busy", False):
+            self.status.set("Close the browser window opened by the test first (or wait for it to finish).")
+            return
+        errorlog.action("Pressed Start")
         self.source = self._make_source()
         self.cfg["show_all"] = self.show_all.get()
         self.cfg.save()
@@ -959,7 +1017,8 @@ class App(tk.Tk):
         ttk.Combobox(f1, textvariable=g_chan, values=("msedge", "chrome", "chromium"), width=14,
                      state="readonly").pack(anchor="w")
         show_win = tk.BooleanVar(value=not bc["headless"])
-        ttk.Checkbutton(f1, text="Show the browser window (turn on to complete a Cloudflare check yourself)",
+        ttk.Checkbutton(f1, text="Show the browser window while working (off = runs in the background; it opens by itself "
+                             "when something goes wrong or a check needs you)",
                         variable=show_win).pack(anchor="w", pady=(8, 0))
         g_dmin = field(f1, "Random pause between actions - shortest (ms, minimum 500)", self.cfg["delay_min_ms"], width=10)
         g_dmax = field(f1, "Random pause between actions - longest (ms)", self.cfg["delay_max_ms"], width=10)
@@ -972,8 +1031,20 @@ class App(tk.Tk):
                                   "forsale_label", "open_labels", "page_timeout_ms", "challenge_wait_s")}
         g_adv = field(f1, "Advanced: text the site shows (change only if the site changes), JSON",
                       json.dumps(adv, indent=1), 7)
-        first = self.watch.entries[0]["name"] if self.watch.entries else "Selective 5-slot Coupon"
-        g_test = field(f1, "Item to use for Test", first)
+        ttk.Label(f1, text="Item to use for Test (pick from the item list, or type any name)").pack(anchor="w", pady=(6, 0))
+        test_var = tk.StringVar(value=self.cfg["test_item"])
+        test_box = ttk.Combobox(f1, textvariable=test_var, width=58, values=self.items.names()[:300])
+        test_box.pack(anchor="w")
+
+        def narrow(_e=None):  # typing narrows the drop-down to matching items; any typed text stays usable
+            typed = test_var.get().strip()
+            try:
+                found = [d for d, _ in self.items.search(typed, 300)] if typed else self.items.names()[:300]
+            except Exception:
+                found = []
+            test_box.configure(values=found)
+        test_box.bind("<KeyRelease>", narrow)
+        g_test = lambda: test_var.get()
 
         # ---- tab 2: item list
         f2 = tab("Item list")
@@ -1037,9 +1108,13 @@ class App(tk.Tk):
             if self.poller and self.poller.is_alive():
                 messagebox.showinfo("Test", "Press Stop on the main window first; the test needs the browser.", parent=w)
                 return
-            name = g_test().strip() or "Selective 5-slot Coupon"
+            name = g_test().strip() or core.DEFAULT_CONFIG["test_item"]
+            self.cfg["test_item"] = name
+            self.cfg.save()
+            errorlog.action(f"Pressed 'Test & save page snapshot' with '{name}'")
             snap = core.data_dir() / "page_snapshot.html"
-            self.status.set(f"Testing with '{name}' - a browser opens briefly...")
+            self.status.set(f"Testing with '{name}' - the browser works in the background and opens if something fails...")
+            self._test_busy = True
 
             def work():
                 src = browser.BrowserSource(self.cfg)
@@ -1047,10 +1122,14 @@ class App(tk.Tk):
                 try:
                     log = src.diagnose(name, snapshot=snap)
                 except Exception as e:
-                    log = [f"FAIL {e}"]
+                    path = errorlog.write("The Settings test crashed", e)
+                    log = [f"FAIL {e}", f"The error log was saved to: {path}"]
+                self.q.put(("test", log))
+                try:
+                    src.hold_open(300)  # a window opened because of a problem stays until you close it
                 finally:
                     src.close()
-                self.q.put(("test", log))
+                    self._test_busy = False
             threading.Thread(target=work, daemon=True).start()
 
         def refresh():
@@ -1065,7 +1144,15 @@ class App(tk.Tk):
         ttk.Button(bar, text="Test & save page snapshot", command=test).pack(side="left", padx=6)
         ttk.Button(bar, text="Update item database", command=refresh).pack(side="left")
         ttk.Button(bar, text="Cross-check report", command=report).pack(side="left", padx=6)
-        ttk.Button(bar, text="Changelog", command=self.show_changelog).pack(side="right")
+        def open_log():
+            p = errorlog.log_path()
+            if p.exists():
+                errorlog.open_in_viewer(p)
+            else:
+                messagebox.showinfo("Error log", "No errors have been logged yet.\n\nWhen something goes wrong the "
+                                    f"details are saved to:\n{p}", parent=w)
+        ttk.Button(bar, text="Open error log", command=open_log).pack(side="right")
+        ttk.Button(bar, text="Changelog", command=self.show_changelog).pack(side="right", padx=6)
         ttk.Button(bar, text="Check for updates", command=lambda: self.check_updates(manual=True, parent=w)
                    ).pack(side="right", padx=6)
 
@@ -1252,6 +1339,16 @@ class App(tk.Tk):
         t.config(state="disabled")
         t.pack(fill="both", expand=True)
 
+    def report_callback_exception(self, exc, val, tb):
+        """A button or timer crashed: write the error log (with the actions before it), then show Tk's usual message."""
+        val.__traceback__ = tb
+        p = errorlog.write("An error happened in the window", val)
+        try:
+            self.status.set(f"Error: {val} - details saved to {p}")
+        except Exception:
+            pass
+        super().report_callback_exception(exc, val, tb)
+
     def _close(self):
         if self.poller:
             self.poller.stop()
@@ -1266,7 +1363,16 @@ class App(tk.Tk):
 
 
 def main():
-    App().mainloop()
+    errorlog.install_hooks()
+    errorlog.action(f"Program started: v{core.VERSION}")
+    a = App()
+    errorlog.set_settings_summary(lambda: {
+        **{k: a.cfg["browser"].get(k) for k in ("start_url", "channel", "headless", "lookback_min", "listing_cap",
+                                                 "max_results_tried", "forsale_label", "row_selector", "item_selector")},
+        "delay_ms": f"{a.cfg['delay_min_ms']}-{a.cfg['delay_max_ms']}",
+        "watchlist": ", ".join(e.get("name", "") for e in a.watch.entries),
+        "feed_items filter": ", ".join(a.cfg["feed_items"]) or "(all)"})
+    a.mainloop()
 
 
 if __name__ == "__main__":

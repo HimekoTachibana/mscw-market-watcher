@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.5.6 - 2026-11-05
+- **Item Name filter in the Live Feed heading** (replaces the Items button of v0.5.5). Click the **▾** at the
+  right end of the "Item Name" heading (the rest of the heading still sorts) to open a drop-down list of items
+  with check boxes: tick one or several, a Search box narrows long lists, **Select all** ticks every item in the
+  list and **Deselect all (reset)** clears the ticks so every item shows again. It applies instantly and is
+  remembered; the heading shows how many items are ticked.
+- **Background scraping works again.** With "Show the browser window" off, the browser now runs in a normal
+  window placed far off-screen (it behaves exactly like the visible window; the old headless mode is only used
+  when there is no screen at all). It no longer shows on your screen or taskbar position.
+- **The browser window opens by itself** when something goes wrong or a person is needed: a Cloudflare check,
+  an HTTP 403, or an error that stops a scan. It opens on the site so you can look or complete a check; the
+  Settings test keeps that window open (up to 5 minutes) until you close it.
+- **Cloudflare / 403:** MesoWatcher never tries to get around a bot check. If the check cannot be completed
+  by hand (it asks again and again), the site is rejecting automated browsers; the program stops with the message
+  "HTTP 403: the site refused the request ..." and writes the details to the error log.
+- **Error log** (`error_log.txt` in the program's data folder; Settings > **Open error log**). Every error,
+  crash, Cloudflare stop, failed Settings test and window error adds a report with the error, versions, key
+  settings, what the browser showed (URL, title, user agent) and the last ~250 actions before it (Start/Stop,
+  page loads, text typed, every search result clicked, tabs opened, listings read). Upload that file to get help.
+  Your contact address is never written to it.
+- **Settings > Test item:** now a drop-down of the item database that still accepts any typed name (typing
+  narrows the list). The default is **Gloves Crit. Rate Scroll: Intermediate** and your last choice is remembered.
+- **Release notes can no longer miss changes:** the notes of each release now contain its own section plus every
+  earlier CHANGELOG version that no release has described yet (`tools/release_notes.py`; tested). Versions
+  v0.5.2 and v0.5.4 were never published on their own, so their notes (below) appear in this release's notes.
+  Releases are numbered from the latest published release (v0.5.5), so no number is skipped.
+- The build now runs the program's self-test (window, Live Feed, browser driver) before packaging.
+
 ## v0.5.5 - 2026-11-05
 - New **Items** button at the top of the Live Feed (next to the two checkboxes): choose one or several items
   to show; nothing ticked shows every item. The choice is remembered. The list holds the items in your

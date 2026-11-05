@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -75,6 +75,7 @@ DEFAULT_CONFIG = {
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it
     "feed_max_age_hours": 0,  # delete Live Feed listings older than this many hours (0 = use the look-back window)
     "feed_dismissed": {},  # {listing key: time.time()} of listings removed with "Clear Live Feed"; they stay gone
+    "test_item": "Gloves Crit. Rate Scroll: Intermediate",  # Settings > Test uses this item
     "feed_items": [],  # Live Feed: only these items are shown (empty = every item)
     "only_with_location": False,  # Live Feed: show only listings that have BOTH a channel and a location
     "sold": [],  # keys of listings the user ticked as sold/checked

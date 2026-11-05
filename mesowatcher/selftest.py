@@ -71,7 +71,13 @@ def _exercise_feed(a, app, core):
     a.cfg["feed_items"] = ["Red Potion"]  # the item filter
     a._render()
     assert [a.tree.set(r, "item") for r in a.tree.get_children()] == ["Red Potion"], "item filter did not apply"
+    a._update_headings()
+    assert "\u25be (1)" in a.tree.heading("item", "text"), "Item Name heading does not show the filter"
+    a.choose_feed_items()  # the drop-down opens
+    a.update()
+    a._item_filter_win.destroy()
     a.cfg["feed_items"] = []
+    a._update_headings()
     a._render()
     a.only_loc.set(True)
     a._render()

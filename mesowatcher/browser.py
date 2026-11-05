@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 
+from . import errorlog
 from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, norm, parse_number,
                    random_pause_s)
 
@@ -344,6 +345,9 @@ class BrowserSource:
         self.scroll_info: dict = {}
         self.match_info = ""
         self.forsale_info = ""
+        self._force_visible = False  # set once the window was opened because something went wrong
+        self.mode = ""  # "window", "background (off-screen window)" or "background (headless)"
+        self._logged: set = set()
 
     # ---- helpers
     @property
@@ -360,6 +364,21 @@ class BrowserSource:
         hi = max(int(self.cfg["delay_max_ms"]), lo)
         time.sleep(random.uniform(lo, lo + (hi - lo) * min(mult, 1.0)) / 1000.0)
 
+    def _act(self, msg: str):
+        errorlog.action(msg)
+
+    @staticmethod
+    def _can_show() -> bool:
+        """Is there a screen to open a (visible or off-screen) window on?"""
+        if sys.platform.startswith("linux"):
+            return bool(os.environ.get("DISPLAY")) and not os.environ.get("WAYLAND_DISPLAY")
+        return True
+
+    @property
+    def background(self) -> bool:
+        """Running without a visible window (Settings: 'Show browser window' off) and nothing has gone wrong yet."""
+        return bool(self.bc["headless"]) and not self._force_visible
+
     # ---- browser lifecycle
     def _open(self):
         if self._page is not None:
@@ -374,15 +393,35 @@ class BrowserSource:
         # Playwright adds --no-sandbox by default, which makes Chromium show an "unsupported
         # command-line flag" bar. Keep the sandbox on; only a Linux root user (containers) needs it off.
         no_sandbox = sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
+        # Background work: a normal browser window is opened far off-screen (it behaves exactly like the window you
+        # can see; a headless browser is treated differently by many sites). Only without a screen is it truly
+        # headless. If something goes wrong the window is opened on screen so you can look at it.
+        args, headless = [], False
+        if self.background:
+            if self._can_show():
+                args = ["--window-position=-32000,-32000", "--window-size=1500,900",
+                        "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling",
+                        "--disable-features=CalculateNativeWinOcclusion"]
+                self.mode = "background (off-screen window)"
+            else:
+                headless = True
+                self.mode = "background (headless, no screen available)"
+        else:
+            self.mode = "window"
+        self._act(f"Opening the browser: {self.mode}, channel '{channel or 'chromium'}'")
         kw = dict(user_data_dir=str(self._profile or (data_dir() / "browser-profile")),
-                  headless=bool(self.bc["headless"]), viewport={"width": 1500, "height": 900},
+                  headless=headless, viewport={"width": 1500, "height": 900},
                   chromium_sandbox=not no_sandbox)
+        if args:
+            kw["args"] = args
         if channel not in ("", "chromium"):
             kw["channel"] = channel
         try:
             self._ctx = self._pw.chromium.launch_persistent_context(**kw)
         except Exception as e:
             self.close()
+            errorlog.write("The browser could not be started", e, {"browser": channel or "chromium", "mode": self.mode})
             raise RuntimeError(f"Could not start the browser '{channel or 'chromium'}': {_short(e)}. "
                                "Pick another browser in Settings (msedge, chrome or chromium).")
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
@@ -408,29 +447,94 @@ class BrowserSource:
         return title.startswith("just a moment") or title.startswith("attention required")
 
     def _clear_challenge(self, page, resp=None):
-        """If a Cloudflare check is showing: stop (headless) or wait for YOU to complete it (window)."""
+        """If a Cloudflare check is showing: open the browser window (when it was running in the background) and
+        wait for YOU to complete it. The program never tries to get past a check by itself."""
         if not self._is_challenge(page, resp):
             return
-        if self.bc["headless"]:
-            raise ChallengeDetected(
-                "A Cloudflare check appeared. Turn on 'Show browser window' in Settings, press Start, "
-                "and complete the check yourself; MesoWatcher continues once the page loads.")
+        self._act("A Cloudflare check is showing")
+        if self.background:
+            page = self._escalate("A Cloudflare check appeared; complete it in the browser window") or page
+            if self.background:  # no screen to show it on
+                raise ChallengeDetected(
+                    "A Cloudflare check appeared and there is no screen to show it on. Run MesoWatcher where a "
+                    "window can open, press Start and complete the check yourself.")
         limit = int(self.bc["challenge_wait_s"])
         for waited in range(limit):
             self._say(f"Waiting for you to complete the check in the browser window ({limit - waited}s left)...")
             time.sleep(1)
             if not self._is_challenge(page):
+                self._act("The Cloudflare check was completed")
                 return
         raise ChallengeDetected(f"The Cloudflare check was not completed within {limit} s.")
 
+    def _escalate(self, reason: str, exc: Optional[BaseException] = None, goto: bool = True):
+        """Something needs a person: write the error log, then reopen the browser WINDOW on the site. Returns the
+        new page (None when there is no screen to open it on)."""
+        key = (reason, type(exc).__name__ if exc else "")
+        path = None
+        if key not in self._logged:
+            self._logged.add(key)
+            path = errorlog.write(reason, exc, self._context())
+        self._say(f"{reason}" + (f" - details saved to {path}" if path else ""))
+        if not self.background:
+            return self._page
+        if not self._can_show():
+            return None
+        self._act(f"Opening the browser window for you ({reason})")
+        self.close()
+        self._force_visible = True
+        try:
+            self._open()
+            if goto:
+                try:
+                    self._page.goto(self.bc["start_url"], wait_until="domcontentloaded")
+                except Exception as e:
+                    self._act(f"Could not load the page in the window: {_short(e)}")
+        except Exception as e:
+            self._act(f"Could not open the window: {_short(e)}")
+            return None
+        return self._page
+
+    def _context(self) -> dict:
+        info = {"browser mode": self.mode or "?", "start url": self.bc.get("start_url")}
+        try:
+            if self._page is not None:
+                info["page url"] = self._page.url
+                info["page title"] = self._page.title()
+                info["user agent"] = self._page.evaluate("navigator.userAgent")
+                info["navigator.webdriver"] = self._page.evaluate("String(navigator.webdriver)")
+        except Exception:
+            pass
+        return info
+
+    def hold_open(self, seconds: int = 300):
+        """Keep a window that was opened for troubleshooting around until it is closed (or time runs out)."""
+        if self._page is None or self.background:
+            return
+        self._say("The browser window stays open for troubleshooting; close it when you are done.")
+        end = time.time() + seconds
+        while time.time() < end:
+            try:
+                if self._page.is_closed() or not self._ctx.pages:
+                    return
+            except Exception:
+                return
+            time.sleep(1)
+
     def _goto_start(self, page):
+        self._act(f"Loading {self.bc['start_url']}")
         resp = page.goto(self.bc["start_url"], wait_until="domcontentloaded")
         self._clear_challenge(page, resp)
         if resp is not None and resp.status in (429, 503):
             ra = resp.headers.get("retry-after", "")
             raise RateLimited(float(ra) if ra.isdigit() else 60.0)
         if resp is not None and resp.status in (401, 403):
-            raise ChallengeDetected(f"HTTP {resp.status}: the site refused access.")
+            self._act(f"The site answered HTTP {resp.status}")
+            e = ChallengeDetected(
+                f"HTTP {resp.status}: the site refused the request (its bot protection rejected the automated "
+                "browser). MesoWatcher does not try to get around that. Details are in the error log.")
+            self._escalate(f"The site refused access (HTTP {resp.status})", e)
+            raise e
         try:
             page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
@@ -521,6 +625,7 @@ class BrowserSource:
         sel = (self.bc.get("item_selector") or "").strip()
         want = self._key(name)
         self.last_candidates, self.last_panels, self.match_info = [], [], ""
+        self._act(f"Typing '{name.strip()}' in the filter box")
         box.fill(name.strip())
         self._delay(0.6)
         self._clear_challenge(page)
@@ -543,6 +648,7 @@ class BrowserSource:
                 row_ids = icon_ids(pool.nth(i).evaluate(_RESULT_ICON_JS))
             except Exception:
                 row_ids = []
+            self._act(f"Clicking search result {i + 1}: '{texts[i]}'")
             pool.nth(i).click()
             self._delay(0.3)  # the usual random pause after a click
             t0 = time.time()
@@ -589,6 +695,7 @@ class BrowserSource:
         t = tab.first
         on = (t.get_attribute("aria-selected") == "true") or ("on" in (t.get_attribute("class") or "").split())
         if not on:
+            self._act(f"Clicking the '{label}' tab")
             t.click()
             self._delay(0.6)
         rows = (self.bc.get("row_selector") or "").strip() or "li.buy-row"
@@ -750,10 +857,25 @@ class BrowserSource:
                                location=p["location"], price=p["price"], avg24h=typical,
                                seller=p["seller"], listed=p["listed"], age_min=p["age_min"],
                                observed=time.time()))
+        si = self.scroll_info
+        self._act(f"Read {len(out)} listing(s) of '{name}' (site says {si.get('expected') or '?'}; "
+                  f"{si.get('steps', 0)} scroll step(s); stopped because {si.get('stop') or '?'})")
         return out, ("" if out else "no listings shown")
 
     # ---- poller interface
     def fetch(self) -> list[Listing]:
+        try:
+            return self._fetch()
+        except RateLimited:
+            raise
+        except ChallengeDetected as e:
+            self._escalate("Stopped by a Cloudflare check / refused access", e)
+            raise
+        except Exception as e:
+            self._escalate(f"An error stopped the scan: {_short(e)}", e)
+            raise
+
+    def _fetch(self) -> list[Listing]:
         names = [e["name"] for e in self.cfg["watchlist"] if e.get("name")]
         self.note = ""
         if not names:
@@ -767,6 +889,7 @@ class BrowserSource:
         notes: list[str] = []
         errors: list[str] = []
         for i, name in enumerate(names):
+            self._act(f"Checking '{name}' ({i + 1}/{len(names)})")
             try:
                 ls, note = self._monitor(page, name)
                 out += ls
@@ -785,12 +908,29 @@ class BrowserSource:
 
     # ---- settings "Test"
     def diagnose(self, name: str, snapshot: Optional[Path] = None) -> list[str]:
+        """Walk through one item step by step and say what worked (see _diagnose). When a step fails the error
+        log is written and, if the test ran in the background, the browser window is opened for you."""
+        errorlog.action(f"Settings test started for '{name}'")
+        log = self._diagnose(name, snapshot)
+        bad = [ln for ln in log if ln.startswith(("FAIL", "STOP"))]
+        if bad:
+            for ln in log:
+                errorlog.action("TEST: " + ln.strip())
+            was_background = self.background
+            self._escalate("The Settings test failed: " + bad[0][:160])
+            log.append(f"The error log was saved to: {errorlog.log_path()}  (upload this file for troubleshooting)")
+            if was_background and not self.background:
+                log.append("The browser window was opened on the site so you can look at it or finish a check by hand.")
+        return log
+
+    def _diagnose(self, name: str, snapshot: Optional[Path] = None) -> list[str]:
         """Walk through one item step by step and say what worked. Saves the rendered page to
         `snapshot` so selectors/labels can be adjusted (and shared) without guessing."""
         log: list[str] = []
         try:
             self._open()
             page = self._page
+            log.append(f"OK  Browser mode: {self.mode}")
             resp = self._goto_start(page)
             log.append(f"OK  Opened {self.bc['start_url']} (HTTP {resp.status if resp else '?'}, "
                        f"title '{page.title()}')")

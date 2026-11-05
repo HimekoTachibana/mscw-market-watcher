@@ -59,6 +59,13 @@ jobs:
         if: runner.os != 'Linux'
         run: python -m pytest -q
 
+      - name: Self-test of the program (window, Live Feed, browser driver)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python run.py --selftest
+          elif [ "$RUNNER_OS" = "macOS" ]; then python run.py --selftest --no-gui
+          else python run.py --selftest; fi
+
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean mesowatcher.spec
 
@@ -95,14 +102,14 @@ jobs:
           fi
 
       - name: Notes from CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          v="${TAG#v}"
-          awk -v v="$v" '
-            $0 ~ "^## v" v " " {on=1; next}
-            on && /^## v/ {exit}
-            on {print}
-          ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then echo "Release ${TAG}" > notes.md; fi
+          # The notes hold this version AND every earlier version no release has described yet.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {tag: .tag_name, body: (.body // "")}' > releases.jsonl
+          python3 tools/release_notes.py CHANGELOG.md "${TAG}" releases.jsonl > notes.md
+          cat notes.md
 
       - name: Create release
         env:

@@ -134,3 +134,56 @@ def test_parse_number():
     assert core.parse_number("1,200") == 1200
     assert core.parse_number("1.5m") == 1_500_000
     assert core.parse_number("abc") is None
+
+
+# ---- release notes include every version no release has described yet
+def _notes_tool():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("release_notes", Path(__file__).resolve().parent.parent / "tools" / "release_notes.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+CHANGELOG = """# Changelog
+
+## v0.6.0 - 2026-11-09
+- six
+
+## v0.5.9 - 2026-11-08
+- five-nine
+
+## v0.5.8 - 2026-11-07
+- five-eight
+
+## v0.5.7 - 2026-11-06
+- five-seven
+"""
+
+
+def test_release_notes_only_current_when_everything_before_was_released():
+    m = _notes_tool()
+    rel = [{"tag": "v0.5.9", "body": "x"}, {"tag": "v0.5.8", "body": "x"}, {"tag": "v0.5.7", "body": "x"}]
+    assert m.build_notes(CHANGELOG, "v0.6.0", rel) == "- six\n"
+
+
+def test_release_notes_include_versions_that_were_never_released():
+    m = _notes_tool()
+    rel = [{"tag": "v0.5.9", "body": "- five-nine"}, {"tag": "v0.5.7", "body": ""}]  # 0.5.8 never had a release
+    out = m.build_notes(CHANGELOG, "v0.6.0", rel)
+    assert "## v0.6.0" in out and "## v0.5.8" in out and "- five-eight" in out
+    assert "five-nine" not in out and "five-seven" not in out
+    assert out.index("v0.6.0") < out.index("v0.5.8")
+
+
+def test_release_notes_skip_versions_whose_heading_is_already_in_a_release():
+    m = _notes_tool()
+    rel = [{"tag": "v0.5.9", "body": "## v0.5.9 - x\n- a\n\n## v0.5.8 - y\n- b"}, {"tag": "v0.5.7", "body": ""}]
+    assert m.build_notes(CHANGELOG, "v0.6.0", rel) == "- six\n"
+
+
+def test_release_notes_without_release_history_and_missing_section():
+    m = _notes_tool()
+    assert m.build_notes(CHANGELOG, "v0.6.0", None) == "- six\n"
+    assert m.build_notes(CHANGELOG, "v9.9.9", []) == "Release v9.9.9\n"

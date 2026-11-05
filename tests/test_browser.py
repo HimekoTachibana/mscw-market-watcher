@@ -1,11 +1,12 @@
 """Browser source tests against a local mock that mimics the layout seen on the real site:
 left item list with a filter box, right panel with 'Where to buy' -> Newest/Cheapest rows."""
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from mesowatcher import browser, core
+from mesowatcher import browser, core, errorlog
 
 MOCK = """<!doctype html><html><head><meta charset="utf-8"><title>Mock FM prices</title>
 <style>.b{border:1px solid #999;padding:0 4px;margin-right:4px}.row,.l{display:flex;gap:12px;padding:6px}
@@ -345,7 +346,10 @@ def test_challenge_stops_headless(src, site):
     src.cfg["watchlist"] = [{"name": "Pan Lid", "max_price": None}]
     with pytest.raises(core.ChallengeDetected) as e:
         src.fetch()
-    assert "Show browser window" in str(e.value)
+    assert "Cloudflare check" in str(e.value)  # no screen here, so it cannot open a window to complete it
+    log = errorlog.log_path().read_text(encoding="utf-8")  # ... but the error log has what happened before
+    assert "Stopped by a Cloudflare check" in log and "A Cloudflare check is showing" in log
+    assert f"Loading {site}/challenge" in log and "WHAT HAPPENED BEFORE" in log
 
 
 def test_diagnose_reports_steps_and_saves_snapshot(src, tmp_path):
@@ -641,3 +645,31 @@ def test_hidden_status_text_is_never_the_location():
     p = browser.parse_listing_text("Oxin\nKerning City Constru\u2026CH 30 \u00b7 22m ago\nSeller not confirmed\n180K", [])
     assert p["location"].startswith("Kerning City")
     assert not core.has_place(p["channel"], "")
+
+
+@pytest.fixture(autouse=True)
+def _private_data_dir(tmp_path, monkeypatch):
+    """Error logs and settings of these tests never touch the real data folder."""
+    monkeypatch.setattr(core, "data_dir", lambda: tmp_path)
+    errorlog.clear()
+
+
+needs_screen = pytest.mark.skipif(not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"),
+                                  reason="needs a screen (run under xvfb-run)")
+
+
+@needs_screen
+def test_background_runs_in_an_off_screen_window_and_scrapes(fsn):
+    assert len(fsn.fetch()) == 60
+    assert fsn.mode == "background (off-screen window)"
+    assert fsn._page.evaluate("[window.screenX, window.screenY]")[0] < -1000  # far off-screen
+
+
+@needs_screen
+def test_window_opens_by_itself_when_a_check_needs_a_person(src, site):
+    src.cfg["browser"]["start_url"] = site + "/challenge"
+    src.cfg["watchlist"] = [{"name": "Pan Lid", "max_price": None}]
+    with pytest.raises(core.ChallengeDetected):
+        src.fetch()  # nobody completes the check
+    assert src.mode == "window" and not src.background
+    assert "Opening the browser window for you" in "\n".join(errorlog.trail())
