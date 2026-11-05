@@ -68,6 +68,13 @@ def _exercise_feed(a, app, core):
     a.only_loc.set(True)
     a._render()
     assert len(a.tree.get_children()) == 2, "'Place not seen' was not filtered out"
+    a.cfg["feed_items"] = ["Red Potion"]  # the item filter
+    a._render()
+    assert [a.tree.set(r, "item") for r in a.tree.get_children()] == ["Red Potion"], "item filter did not apply"
+    a.cfg["feed_items"] = []
+    a._render()
+    a.only_loc.set(True)
+    a._render()
     a.sort_by("target")  # sorting by the new column must not fail
     a.sort_by("target")
     a.cfg["feed_max_age_hours"] = 0.001  # 3.6 s: the 3-minute-old listings are older than that

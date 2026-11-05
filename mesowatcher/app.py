@@ -318,6 +318,9 @@ class App(tk.Tk):
         self.only_loc = tk.BooleanVar(value=self.cfg["only_with_location"])
         ttk.Checkbutton(top, text="Only listings with Channel and Location", variable=self.only_loc,
                         command=self._render).pack(side="left")
+        self.items_btn = ttk.Button(top, command=self.choose_feed_items)
+        self.items_btn.pack(side="left", padx=12)
+        self._items_label()
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="Clear Live Feed", command=self.clear_feed).pack(side="right", padx=6)
 
@@ -654,6 +657,55 @@ class App(tk.Tk):
         self._render()
 
     # ------------------------------------------------------------ actions
+    def _items_label(self):
+        n = len(self.cfg["feed_items"])
+        self.items_btn.config(text="Items: all" if not n else f"Items: {n} chosen")
+
+    def choose_feed_items(self):
+        """Pick which items the Live Feed shows (tick one or several; nothing ticked = every item)."""
+        names = {l.item_name for l in self.listings} | {e["name"] for e in self.watch.entries if e.get("name")} \
+            | set(self.cfg["feed_items"])
+        names = sorted(names, key=str.lower)
+        w = tk.Toplevel(self)
+        w.title("Live Feed - choose items")
+        w.transient(self)
+        w.geometry("380x420")
+        ttk.Label(w, padding=8, wraplength=350, text="Tick the items to show in the Live Feed. "
+                  "Nothing ticked shows every item.").pack(anchor="w")
+        box = ttk.Frame(w)
+        box.pack(fill="both", expand=True, padx=8)
+        cv = tk.Canvas(box, highlightthickness=0)
+        sb = ttk.Scrollbar(box, orient="vertical", command=cv.yview)
+        inner = ttk.Frame(cv)
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window((0, 0), window=inner, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        chosen = {n.lower() for n in self.cfg["feed_items"]}
+        vars_ = {n: tk.BooleanVar(value=n.lower() in chosen) for n in names}
+        for n in names:
+            ttk.Checkbutton(inner, text=n, variable=vars_[n]).pack(anchor="w")
+        if not names:
+            ttk.Label(inner, text="No items yet - add items to the Watchlist or wait for listings.").pack(anchor="w")
+        bar = ttk.Frame(w, padding=8)
+        bar.pack(fill="x")
+
+        def setall(v):
+            for b in vars_.values():
+                b.set(v)
+
+        def ok():
+            self.cfg["feed_items"] = [n for n in names if vars_[n].get()]
+            self.cfg.save()
+            self._items_label()
+            self._render()
+            w.destroy()
+        ttk.Button(bar, text="Tick all", command=lambda: setall(True)).pack(side="left")
+        ttk.Button(bar, text="Clear ticks", command=lambda: setall(False)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Cancel", command=w.destroy).pack(side="right")
+        ttk.Button(bar, text="OK", command=ok).pack(side="right", padx=6)
+
     def clear_feed(self):
         """Delete every listing from the Live Feed. The same shops, still on the site, are not added
         again on the next pass; listings that are new appear as usual."""
@@ -844,6 +896,7 @@ class App(tk.Tk):
         sold = set(self.cfg["sold"])
         self.listings = core.prune_listings(self.listings, core.feed_retention(self.cfg))
         rows = [l for l in self.listings if self.show_all.get() or self.watch.matches(l)]
+        rows = core.feed_item_filter(rows, self.cfg["feed_items"])
         if self.only_loc.get():
             rows = [l for l in rows if core.has_place(l.channel, l.location)]  # "Place not seen" is not a place
         reselect = []

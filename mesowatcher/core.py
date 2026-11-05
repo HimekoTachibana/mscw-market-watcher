@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -75,6 +75,7 @@ DEFAULT_CONFIG = {
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it
     "feed_max_age_hours": 0,  # delete Live Feed listings older than this many hours (0 = use the look-back window)
     "feed_dismissed": {},  # {listing key: time.time()} of listings removed with "Clear Live Feed"; they stay gone
+    "feed_items": [],  # Live Feed: only these items are shown (empty = every item)
     "only_with_location": False,  # Live Feed: show only listings that have BOTH a channel and a location
     "sold": [],  # keys of listings the user ticked as sold/checked
     "feed_sort": {"col": "listed", "desc": False},  # default: most recent listing on top
@@ -353,6 +354,12 @@ def has_place(channel: str, location: str) -> bool:
     if not ch or ch in ("-", "?") or not loc or loc == "-":
         return False
     return not _NO_PLACE_RE.match(loc)
+
+
+def feed_item_filter(listings, selected) -> list:
+    """Listings of the chosen items only; an empty choice means every item."""
+    want = {str(n).strip().lower() for n in (selected or []) if str(n).strip()}
+    return [l for l in listings if l.item_name.strip().lower() in want] if want else list(listings)
 
 
 def is_dismissed(l: "Listing", dismissed: dict) -> bool:

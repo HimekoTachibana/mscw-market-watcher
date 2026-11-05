@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.5 - 2026-11-05
+- New **Items** button at the top of the Live Feed (next to the two checkboxes): choose one or several items
+  to show; nothing ticked shows every item. The choice is remembered. The list holds the items in your
+  Watchlist and every item that has listings in the feed.
+
 ## v0.5.4 - 2026-11-05
 - Fixed "Likely still up" showing in the Location column. That is hidden status text the site adds to every
   row; for shops that show a channel but no map it was mistaken for the location. It (and "Seller not

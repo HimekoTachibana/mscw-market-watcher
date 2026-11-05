@@ -108,3 +108,13 @@ def test_selftest_prints_a_verdict(capsys, tmp_path, monkeypatch):
     out = capsys.readouterr().out
     assert rc in (0, 1) and "[INFO] program: MSCW Market Watcher v" in out and "SELFTEST RESULT:" in out
     assert "[SKIP] window: --no-gui" in out
+
+
+def test_feed_item_filter_chooses_one_several_or_all_items():
+    L = lambda n: core.Listing(key=n, item_id="", item_name=n, channel="1", location="FM 1", price=1, avg24h=None,
+                               seller="s", listed="", age_min=1.0, observed=0.0)
+    ls = [L("Pan Lid"), L("Red Potion"), L("Pan Lid"), L("Garnet Ore")]
+    assert len(core.feed_item_filter(ls, [])) == 4 and len(core.feed_item_filter(ls, None)) == 4
+    assert [l.item_name for l in core.feed_item_filter(ls, ["pan lid "])] == ["Pan Lid", "Pan Lid"]
+    assert {l.item_name for l in core.feed_item_filter(ls, ["Pan Lid", "Garnet Ore"])} == {"Pan Lid", "Garnet Ore"}
+    assert core.DEFAULT_CONFIG["feed_items"] == []
