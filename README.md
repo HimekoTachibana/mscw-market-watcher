@@ -96,7 +96,9 @@ program inside it). The version comes from `VERSION` in `mesowatcher/core.py`.
 * **macOS:** `./build_macos.sh`, result `dist/MSCW Market Watcher v0.4.0.app` (unsigned: right-click -> Open).
 * **All three automatically:** push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The GitHub
   Actions workflow builds Windows, Linux and macOS, runs the tests, and attaches the zips to the
-  release (or download them from the run's Artifacts). You can also start it by hand under Actions -> Build.
+  release (or download them from the run's Artifacts). You can also start it by hand under Actions -> Build
+  -> Run workflow: tick **Publish a release** to create the tag `v<VERSION>` and the release from the
+  selected branch without using git on your computer, or leave it unticked to only get Artifacts.
 
 ## Releasing a new version
 
