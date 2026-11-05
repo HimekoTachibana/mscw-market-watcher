@@ -20,7 +20,8 @@ except ImportError:  # icons are optional
 from . import browser, core, updater
 
 COLS = [("item", "Item Name", 230), ("seller", "Seller", 110), ("channel", "Channel", 65),
-        ("location", "Location", 170), ("price", "Price", 90), ("listed", "Listed", 90),
+        ("location", "Location", 170), ("price", "Price", 90), ("target", "Target Price", 95),
+        ("listed", "Listed", 90),
         ("avg", "24h AVG", 90), ("disc", "Discount", 75)]
 DURATIONS = ("15 minutes", "30 minutes", "1 hour", "2 hours", "3 hours", "6 hours")
 ICON = 26
@@ -224,7 +225,7 @@ class App(tk.Tk):
         self.poller: core.Poller | None = None
         self.q: queue.Queue = queue.Queue()
         self.listings: list[core.Listing] = core.prune_listings(core.load_listings(),
-                                                                core.effective_window(self.cfg))
+                                                                core.feed_retention(self.cfg))
         self.watch.alerted.update(l.key for l in self.listings)  # old listings must not beep again
         self._keys: dict[str, str] = {}
         self._combo: dict = {}
@@ -318,6 +319,7 @@ class App(tk.Tk):
         ttk.Checkbutton(top, text="Only listings with Channel and Location", variable=self.only_loc,
                         command=self._render).pack(side="left")
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
+        ttk.Button(top, text="Clear Live Feed", command=self.clear_feed).pack(side="right", padx=6)
 
         al = ttk.Frame(self, padding=(6, 0))
         al.pack(fill="x")
@@ -351,7 +353,7 @@ class App(tk.Tk):
         self.tree.column("#0", width=72, minwidth=60, stretch=False, anchor="w")
         for cid, title, w in COLS:
             self.tree.column(cid, width=int(self.cfg["feed_widths"].get(cid, w)), minwidth=40,
-                             anchor="e" if cid in ("price", "avg", "disc", "listed") else "w")
+                             anchor="e" if cid in ("price", "target", "avg", "disc", "listed") else "w")
         self.tree["displaycolumns"] = self._column_order()
         self.tree.tag_configure("deal", background="#d9f2d9")
         self.tree.tag_configure("sold", background="#e6e6e6", foreground="#9a9a9a")
@@ -432,8 +434,7 @@ class App(tk.Tk):
     # ---- feed columns: order, sorting, drag to reorder
     def _column_order(self) -> list[str]:
         ids = [c[0] for c in COLS]
-        saved = [c for c in self.cfg["feed_columns"] if c in ids]
-        return saved + [c for c in ids if c not in saved]
+        return core.merge_column_order(list(self.cfg["feed_columns"]), ids)
 
     def _display_cols(self) -> list[str]:
         dc = list(self.tree["displaycolumns"])
@@ -513,8 +514,7 @@ class App(tk.Tk):
         self._update_headings()
         self._render()
 
-    @staticmethod
-    def _sort_value(col: str, l: core.Listing, sold: set):
+    def _sort_value(self, col: str, l: core.Listing, sold: set):
         if col == "item":
             return l.item_name.lower()
         if col == "seller":
@@ -525,6 +525,8 @@ class App(tk.Tk):
             return (l.location or "").lower() or None
         if col == "price":
             return l.price
+        if col == "target":
+            return self.watch.target(l.item_name)[1]  # blank (not watched, or any price) sorts last
         if col == "listed":
             return l.age_now()
         if col == "avg":
@@ -652,6 +654,21 @@ class App(tk.Tk):
         self._render()
 
     # ------------------------------------------------------------ actions
+    def clear_feed(self):
+        """Delete every listing from the Live Feed. The same shops, still on the site, are not added
+        again on the next pass; listings that are new appear as usual."""
+        if self.listings and not messagebox.askyesno(
+                "Clear Live Feed", f"Delete all {len(self.listings)} listings from the Live Feed?\n\n"
+                "The same shops will not be added again; new listings will appear as usual."):
+            return
+        self.cfg["feed_dismissed"] = core.dismiss_all(self.listings, self.cfg["feed_dismissed"])
+        self.listings = []
+        self.cfg["sold"] = []  # their rows are gone
+        self.cfg.save()
+        core.save_listings(self.listings)
+        self._render()
+        self.status.set("Live Feed cleared.")
+
     def _save_audio(self):
         self.cfg["muted"] = self.muted.get()
         self.cfg["volume"] = int(self.vol.get())
@@ -724,7 +741,9 @@ class App(tk.Tk):
     def _make_source(self):
         if self.cfg["source_mode"] == "api":
             return core.ListingSource(self.cfg)
-        return browser.BrowserSource(self.cfg)
+        src = browser.BrowserSource(self.cfg)
+        src.items = self.items  # lets the item icon be checked against the item database
+        return src
 
     def _show_text(self, title: str, text: str, parent=None, size: str = "720x420"):
         r = tk.Toplevel(parent or self)
@@ -775,8 +794,10 @@ class App(tk.Tk):
                     if self._announce:
                         messagebox.showinfo("Item database", "\n\n".join(payload)[:1800])
                 else:
+                    gone = self.cfg["feed_dismissed"]  # listings removed with "Clear Live Feed" stay gone
+                    payload = [l for l in payload if not core.is_dismissed(l, gone)]
                     self.listings = core.prune_listings(core.merge_listings(self.listings, payload),
-                                                        core.effective_window(self.cfg))
+                                                        core.feed_retention(self.cfg))
                     sold = set(self.cfg["sold"])
                     fresh = [l for l in self.watch.new_matches(payload) if l.key not in sold]
                     core.save_listings(self.listings)
@@ -821,15 +842,16 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         self._keys = {}
         sold = set(self.cfg["sold"])
-        win = core.effective_window(self.cfg)
-        self.listings = core.prune_listings(self.listings, win)
+        self.listings = core.prune_listings(self.listings, core.feed_retention(self.cfg))
         rows = [l for l in self.listings if self.show_all.get() or self.watch.matches(l)]
         if self.only_loc.get():
-            rows = [l for l in rows if l.channel and l.location]
+            rows = [l for l in rows if core.has_place(l.channel, l.location)]  # "Place not seen" is not a place
         reselect = []
         for n, l in enumerate(self._sorted(rows)):
             d = l.discount
-            vals = (l.item_name, l.seller or "-", l.channel or "-", l.location or "-", f"{l.price:,}",
+            watched, tmax = self.watch.target(l.item_name)
+            target = "-" if not watched else (f"{tmax:,}" if tmax is not None else "any")
+            vals = (l.item_name, l.seller or "-", l.channel or "-", l.location or "-", f"{l.price:,}", target,
                     core.fmt_age(l.age_now()) if l.age_min is not None else (l.listed or "-"),
                     f"{l.avg24h:,.0f}" if l.avg24h else "-", f"{d:.1f}%" if d is not None else "-")
             is_sold = l.key in sold
@@ -915,6 +937,12 @@ class App(tk.Tk):
         # ---- tab 3: general
         f3 = tab("General")
         g_contact = field(f3, "Contact (email/Discord), sent in the User-Agent of item-list downloads", self.cfg["contact"])
+        g_keep = field(f3, "Delete Live Feed listings older than (hours; 0 = use 'Show listings from the last')",
+                       f"{self.cfg['feed_max_age_hours']:g}", width=10)
+        ttk.Label(f3, foreground="#555", wraplength=650, text=(
+            "Example: 6 deletes a listing from the Live Feed once it is more than 6 hours old (the clock "
+            "keeps running while the program is closed). The 'Show listings from the last' box in the main "
+            "window still decides how far back the site is read.")).pack(anchor="w", pady=(2, 0))
         ttk.Label(f3, text=f"Installed version: v{core.VERSION}").pack(anchor="w", pady=(14, 0))
         upd_on = tk.BooleanVar(value=self.cfg["update_check_on_start"])
         ttk.Checkbutton(f3, text="Check for a new release when the program starts", variable=upd_on).pack(anchor="w")
@@ -924,6 +952,9 @@ class App(tk.Tk):
                 dmin = max(int(g_dmin()), 500)
                 dmax = max(int(g_dmax()), dmin)
                 mx = max(int(g_max()), 1)
+                keep_h = float(g_keep().strip() or 0)
+                if keep_h < 0:
+                    raise ValueError("Delete listings older than: enter hours, 0 or more")
                 extra = json.loads(g_adv() or "{}")
                 if not isinstance(extra, dict):
                     raise ValueError("Advanced must be a JSON object")
@@ -939,6 +970,7 @@ class App(tk.Tk):
             self.cfg["meowdb_enabled"] = meow_on.get()
             self.cfg["meowdb_add_missing"] = add_on.get()
             self.cfg["contact"] = g_contact().strip()
+            self.cfg["feed_max_age_hours"] = keep_h
             self.cfg["update_check_on_start"] = upd_on.get()
             self.cfg.save()
             return True
@@ -955,6 +987,7 @@ class App(tk.Tk):
 
             def work():
                 src = browser.BrowserSource(self.cfg)
+                src.items = self.items
                 try:
                     log = src.diagnose(name, snapshot=snap)
                 except Exception as e:

@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.1 - 2026-11-04
+- **Clear Live Feed** button (top right, next to Settings) deletes every listing after a confirmation. The
+  same shops, still on the site, are not added again on the next pass; new listings appear as usual.
+- **Settings > General > Delete Live Feed listings older than (hours)**: listings are deleted from the feed
+  once they pass that age (for example 6). The clock keeps running while the program is closed. 0 = off
+  (the "Show listings from the last" box decides, as before).
+- **Only listings with Channel and Location** now also hides listings whose location is "Place not seen"
+  (or "FM ?"), which used to slip through.
+- New **Target Price** column right after Price: the max price you set for that item in the Watchlist
+  ("any" if you watch it with no limit, "-" if it is not on the watchlist). Sortable and movable like the
+  others; existing saved column orders get it next to Price.
+- **Scrolling the Newest list** is much more persistent. It finds the box that really scrolls, moves down
+  one screen at a time (you can watch the scroll bar move in a visible browser), waits up to 3 s at the
+  bottom for the site to load more, then rolls the mouse wheel and presses a "Load more" button if there is
+  one, and only after two such tries decides the list has ended. Before, it gave up after one short wait.
+  Settings > Test now reports how many times it scrolled, in which box, and why it stopped.
+- **Opening the right item**: after typing the name, search results are opened one after the other (a
+  result whose text equals the name goes first) until the right-hand panel shows the item: its heading
+  must read exactly like the name, and its icon must be that item's icon when the icon can be compared.
+  A result that opens something else is skipped. This fixes scrolls that were no longer being opened.
+  If nothing matches, the status line says what the panel showed instead.
+- Added `--selftest` (headless self-check used to test the Linux build on other distributions).
+
 ## v0.5.0 - 2026-11-04
 - **Auto-update:** Settings > **Check for updates** looks at the project's GitHub releases. If a newer
   version exists, a popup shows what's new with **Update** and **Cancel**. Update downloads the build for

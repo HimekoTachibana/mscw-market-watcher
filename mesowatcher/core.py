@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -71,6 +71,8 @@ DEFAULT_CONFIG = {
         "open_labels": ["Where to buy", "For sale now"],
     },
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it
+    "feed_max_age_hours": 0,  # delete Live Feed listings older than this many hours (0 = use the look-back window)
+    "feed_dismissed": {},  # {listing key: time.time()} of listings removed with "Clear Live Feed"; they stay gone
     "only_with_location": False,  # Live Feed: show only listings that have BOTH a channel and a location
     "sold": [],  # keys of listings the user ticked as sold/checked
     "feed_sort": {"col": "listed", "desc": False},  # default: most recent listing on top
@@ -329,6 +331,59 @@ def effective_window(cfg: "Config") -> float:
     return min(vals) if vals else 0.0
 
 
+def feed_retention(cfg: "Config") -> float:
+    """How old (minutes) a listing may get before it is deleted from the Live Feed. Settings >
+    'Delete Live Feed listings older than ... hours' wins; 0 means the look-back window decides."""
+    try:
+        hours = float(cfg["feed_max_age_hours"] or 0)
+    except (TypeError, ValueError):
+        hours = 0.0
+    return hours * 60.0 if hours > 0 else effective_window(cfg)
+
+
+_NO_PLACE_RE = re.compile(r"^\W*(?:place\s+not\s+seen|not\s+seen|unknown(?:\s+place)?|(?:fm|ch)\s*\?)\W*$", re.I)
+
+
+def has_place(channel: str, location: str) -> bool:
+    """True when a listing really shows both a channel and a location. The site writes 'Place not seen'
+    when it does not know where the shop is; that is not a location."""
+    ch, loc = (channel or "").strip(), (location or "").strip()
+    if not ch or ch in ("-", "?") or not loc or loc == "-":
+        return False
+    return not _NO_PLACE_RE.match(loc)
+
+
+def is_dismissed(l: "Listing", dismissed: dict) -> bool:
+    """True for a listing the user removed with 'Clear Live Feed' and that the site still shows. The same shop
+    relisted later gets the same key but is younger than the time since the clear, so it comes back."""
+    t = dismissed.get(l.key)
+    if t is None:
+        return False
+    if l.age_min is None or not l.observed:
+        return True
+    return l.observed - l.age_min * 60.0 <= float(t) + 60.0  # listed before the clear (a minute of rounding slack)
+
+
+def dismiss_all(listings: list["Listing"], dismissed: dict, now: Optional[float] = None, keep_days: float = 2.0) -> dict:
+    """The dismissed map after clearing `listings`; entries older than keep_days are forgotten."""
+    now = now or time.time()
+    out = {k: t for k, t in dismissed.items() if now - float(t) < keep_days * 86400}
+    out.update({l.key: now for l in listings})
+    return out
+
+
+def merge_column_order(saved: list[str], ids: list[str]) -> list[str]:
+    """Saved column order, ignoring unknown ids. A column added by an update goes right after the column
+    that precedes it in the default layout instead of at the far right."""
+    order = [c for c in saved if c in ids]
+    for i, cid in enumerate(ids):
+        if cid in order:
+            continue
+        prev = ids[i - 1] if i else None
+        order.insert(order.index(prev) + 1 if prev in order else (len(order) if i else 0), cid)
+    return order
+
+
 def fmt_age(minutes: Optional[float]) -> str:
     if minutes is None:
         return "-"
@@ -441,6 +496,13 @@ class Watchlist:
 
     def remove(self, name: str):
         self.cfg["watchlist"] = [e for e in self.entries if e["name"].lower() != name.lower()]
+
+    def target(self, item_name: str) -> tuple[bool, Optional[int]]:
+        """(is it on the watchlist, its max price or None for 'any price')."""
+        for e in self.entries:
+            if e["name"].lower() == (item_name or "").lower():
+                return True, e.get("max_price")
+        return False, None
 
     def matches(self, l: Listing) -> bool:
         limit = effective_window(self.cfg)

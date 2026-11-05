@@ -33,7 +33,7 @@ function renderList(q){
   document.querySelectorAll('#list .row').forEach(r=>r.onclick=()=>pick(r.dataset.n));
 }
 function pick(n){
-  cur=n; const title=n==="Earring LUK Scroll"?"Earring LUK Scroll: Intermediate":n;
+  cur=n; const title=n;
   document.getElementById('panel').innerHTML=`<h2>${title}</h2><div><span>Item Info</span> <span>For sale now 102</span></div>
    <button id="wtb">Where to buy 102</button><div id="lst" hidden></div>`;
   document.getElementById('wtb').onclick=()=>{document.getElementById('lst').hidden=false;renderL();};
@@ -124,12 +124,56 @@ renderTable(''); renderDetail();
 </script></body></html>"""
 
 
+# The real page's right-hand panel is what proves the right item is open. Here the list texts differ from the
+# real names (the case that stopped scrolls being found), the first result is the WRONG scroll, and the panel
+# has an icon whose file name holds the item id.
+MOCK_SCROLLS = """<!doctype html><html><head><meta charset="utf-8"><title>Scrolls mock</title></head><body>
+<input id="search" type="search" placeholder="Filter items\\u2026"><table><tbody id="rows"></tbody></table><section id="detail"></section>
+<script>
+const BAD = location.search.includes('bad');
+const MODE = (location.search.match(/mode=(\\w+)/)||[])[1] || 'plain';
+const ITEMS=[
+ {label:"Shoes Speed Scroll: Intermediate (60%)", panel:"Shoes Speed Scroll: Intermediate", icon:"02040001", shop:"WrongShop"},
+ {label:"Shoes Speed Scroll: Chaos (60%)", panel:"Shoes Speed Scroll: Chaos", icon:"02040000", shop:"RightShop"}];
+if (MODE==='sameName') { ITEMS[0].panel="Shoes Speed Scroll: Chaos"; }   // right name, wrong icon (an Intermediate scroll)
+let cur=-1;
+function renderTable(q){
+  document.getElementById('rows').innerHTML=ITEMS.map((it,i)=>
+   `<tr><td><button class="item-name item-select" data-i="${i}">${it.label}</button></td>
+    <td data-col="price"><span class="meso" title="30,000 mesos">30K</span></td></tr>`).join('');
+  document.querySelectorAll('button.item-select').forEach(b=>b.onclick=()=>{cur=+b.dataset.i;renderDetail();});
+}
+function renderDetail(){
+  const it=ITEMS[cur]; const name=BAD?"Something Else Entirely":it.panel;
+  document.getElementById('detail').innerHTML=`<div class="head"><img src="/icons/${it.icon}.png?v=20261104" alt=""><h2>${name}</h2></div>
+   <button class="list-tab">Where to buy</button><button>Newest</button>
+   <ul class="buy-list scroll"><li class="buy-row"><div class="buy-main"><div class="buy-seller">${it.shop}</div>
+   <div class="buy-meta"><span>CH 9</span><span>FM9</span><span class="buy-when">&nbsp;\\u00b7 2m ago</span></div></div>
+   <div class="buy-price"><span class="meso" title="30,000 mesos">30K</span><small>each</small></div></li></ul>`;
+}
+document.getElementById('search').oninput=e=>renderTable(e.target.value);
+renderTable('');
+</script></body></html>"""
+
+# Lists that load more rows in less friendly ways than "instantly on scroll":
+_LOADER = """ul.onscroll=()=>{ if(shown<rows.length && ul.scrollTop+ul.clientHeight>=ul.scrollHeight-30){
+    ul.insertAdjacentHTML('beforeend', rows.slice(shown,shown+12).map(li).join('')); shown+=12; } };"""
+assert _LOADER in MOCK_REAL
+MOCK_SLOW = MOCK_REAL.replace(_LOADER, """let busy=false; ul.onscroll=()=>{ if(!busy && shown<rows.length && ul.scrollTop+ul.clientHeight>=ul.scrollHeight-30){
+    busy=true; setTimeout(()=>{ ul.insertAdjacentHTML('beforeend', rows.slice(shown,shown+12).map(li).join('')); shown+=12; busy=false; }, 1600); } };""")
+MOCK_WHEEL = MOCK_REAL.replace(_LOADER, _LOADER.replace("ul.onscroll=", "ul.onwheel="))  # only a mouse wheel loads more
+MOCK_BUTTON = MOCK_REAL.replace(_LOADER, """const more=document.createElement('button'); more.textContent='Load more'; more.className='more';
+  ul.after(more); more.onclick=()=>{ ul.insertAdjacentHTML('beforeend', rows.slice(shown,shown+12).map(li).join('')); shown+=12; };""")
+PAGES = {"/real-slow": MOCK_SLOW, "/real-wheel": MOCK_WHEEL, "/real-button": MOCK_BUTTON, "/scrolls": MOCK_SCROLLS}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def do_GET(self):
-        page = CHALLENGE if self.path.startswith("/challenge") else MOCK_REAL if self.path.startswith("/real") else MOCK
+        page = next((p for k, p in PAGES.items() if self.path.startswith(k)), None) or (
+            CHALLENGE if self.path.startswith("/challenge") else MOCK_REAL if self.path.startswith("/real") else MOCK)
         body = page.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -391,3 +435,79 @@ def test_diagnose_says_so_when_listings_are_only_older_than_the_window(real):
     text = "\n".join(log)
     assert "no listings in the last 1 minutes" in text and "Nothing is wrong" in text
     assert "FAIL" not in text
+
+
+# ------------------------------------------- scrolling the Newest list: slow, wheel-only and "Load more" sites
+def _lazy(src, site, path):
+    src.cfg["browser"].update(start_url=site + path, filter_placeholder="Filter items...")
+    src.cfg["watchlist"] = [{"name": "Lazy Item", "max_price": None}]
+    return src.fetch()
+
+
+@pytest.mark.parametrize("path", ["/real-slow", "/real-wheel", "/real-button"])
+def test_scrolling_survives_slow_wheel_only_and_load_more_lists(src, site, path):
+    ls = _lazy(src, site, path)
+    assert [l.seller for l in ls] == [f"Shop{i}" for i in range(18)]  # everything inside 3 hours, not just the first 12
+    assert src._page.locator("li.buy-row").count() > 12
+    si = src.scroll_info
+    assert si["loads"] >= 1 and si["steps"] >= 2 and "older than the look-back window" in si["stop"]
+    assert si["container"].startswith("ul")  # found the real scrolling box
+
+
+def test_scroll_report_says_where_and_why_it_stopped(real):
+    log = "\n".join(real.diagnose("Lazy Item"))
+    assert "Scrolled the Newest list" in log and "ul.buy-list.scroll" in log and "site loaded more" in log
+
+
+def test_list_that_really_ends_stops_after_waiting(real):
+    real.bc["lookback_min"] = 100000  # nothing is "too old", so only the end of the list can stop it
+    real.cfg["watchlist"] = [{"name": "Lazy Item", "max_price": None}]
+    ls = real.fetch()
+    assert len(ls) == 40 and real.scroll_info["stop"].startswith("the list stopped growing")
+
+
+# ------------------------------------------- opening the right item: check the right-hand panel
+class _Items:  # the bit of ItemDB the check uses
+    items = {"02040000": {"name": "Shoes Speed Scroll: Chaos"}, "02040001": {"name": "Shoes Speed Scroll: Intermediate"}}
+
+
+def test_icon_ids_come_from_the_file_name_only():
+    assert browser.icon_ids("/icons/02040000.png?v=20261104") == ["02040000"]
+    assert browser.icon_ids("https://cdn.x/items/2040000@2x.webp") == ["2040000"]
+    assert browser.icon_ids('url("https://cdn.x/i/item_02040001.png")') == ["02040001"]
+    assert browser.icon_ids("https://cdn.x/20261104/icon.png") == []  # the id is in a folder name: ignored
+    assert browser.icon_ids("") == []
+
+
+def test_next_result_is_tried_when_the_first_opens_another_item(src, site):
+    src.cfg["browser"].update(start_url=site + "/scrolls")
+    src.items = _Items()
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    ls = src.fetch()
+    assert [l.seller for l in ls] == ["RightShop"] and src.note == ""
+    assert src.last_panels == ["Shoes Speed Scroll: Intermediate"]  # the first result was opened and rejected
+    assert src.match_info == "name and icon match"
+
+
+def test_right_name_but_wrong_icon_is_skipped(src, site):
+    src.cfg["browser"].update(start_url=site + "/scrolls?mode=sameName")
+    src.items = _Items()
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert [l.seller for l in src.fetch()] == ["RightShop"]
+    assert src.last_panels and "wrong icon" in src.last_panels[0]
+
+
+def test_without_an_item_database_the_name_alone_decides(src, site):
+    src.cfg["browser"].update(start_url=site + "/scrolls")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert [l.seller for l in src.fetch()] == ["RightShop"]
+    assert src.match_info == "name matches (icon cannot be compared)"
+
+
+def test_nothing_matching_records_nothing_and_says_what_the_panel_showed(src, site):
+    src.cfg["browser"].update(start_url=site + "/scrolls?bad=1")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert src.fetch() == []
+    assert "none of the 2 search results opened this item" in src.note and "Something Else Entirely" in src.note
+    log = "\n".join(src.diagnose("Shoes Speed Scroll: Chaos"))
+    assert "FAIL Opened 2 search result(s)" in log and "never showed 'Shoes Speed Scroll: Chaos'" in log

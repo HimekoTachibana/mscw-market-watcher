@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import unquote, urlparse
 
 from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, norm, parse_number,
                    random_pause_s)
@@ -35,6 +36,19 @@ _MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun",
 _MESOS_TITLE_RE = re.compile(r"^\s*([\d,]+)\s*mesos\s*$", re.I)  # tooltip: "44,999 mesos"
 
 RELOAD_EVERY = 10  # full page reload every N cycles, to recover from a stale page
+MAX_RESULTS_TRIED = 12  # most search results opened (one after the other) to find the item
+_ICON_ID_RE = re.compile(r"(?<!\d)(\d{5,9})(?!\d)")
+
+
+def icon_ids(src: str) -> list[str]:
+    """Item ids written in an icon's file name, e.g. '/icons/02040000.png' or 'item_2040000@2x.webp'.
+    Only the file name counts (not the folders or the ?query), so cache-busters like '?v=20261104' are ignored."""
+    if not src:
+        return []
+    m = re.search(r"url\(\s*[\"']?([^\"')]+)", src)  # a CSS background-image
+    path = unquote(urlparse(m.group(1) if m else src).path)
+    name = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return _ICON_ID_RE.findall(name)
 
 
 # ----------------------------------------------------------------- pure parsing
@@ -159,15 +173,80 @@ _READ_ROWS_JS = r"""
 """
 
 # the item's row in the table: exact TYPICAL price is in the tooltip of its price cell
-_SCROLL_LIST_JS = r"""
+# Scroll the Newest list down by about one screen (frac) or to the very bottom (frac >= 99). The scrolling
+# box is found by looking for the nearest scrollable ancestor of the last row, so it works whatever the
+# site calls it. Returns where it is now, so Python can tell "still travelling" from "reached the bottom".
+_SCROLL_STEP_JS = r"""
+([sel, frac]) => {
+  const rows = Array.from(document.querySelectorAll(sel));
+  if (!rows.length) return null;
+  const last = rows[rows.length - 1];
+  const scrollable = el => { const s = getComputedStyle(el);
+    return /(auto|scroll|overlay)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 2; };
+  let box = last.parentElement;
+  while (box && box !== document.body && box !== document.documentElement && !scrollable(box)) box = box.parentElement;
+  const useWin = !box || box === document.body || box === document.documentElement;
+  const el = useWin ? (document.scrollingElement || document.documentElement) : box;
+  const h = useWin ? window.innerHeight : el.clientHeight;
+  const before = el.scrollTop;
+  el.scrollTop = Math.min(frac >= 99 ? el.scrollHeight : before + Math.max(h * frac, 120), el.scrollHeight);
+  if (el.scrollTop === before) last.scrollIntoView({block: 'end'});  // not scrollable by us: let the browser do it
+  const r = useWin ? {left: 0, top: 0, width: window.innerWidth, height: window.innerHeight} : el.getBoundingClientRect();
+  const cls = String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || '').trim();
+  return {moved: el.scrollTop - before, atBottom: el.scrollTop + h >= el.scrollHeight - 2, rows: rows.length,
+          tag: useWin ? 'page' : el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+               (cls ? '.' + cls.split(/\s+/).slice(0, 3).join('.') : ''),
+          x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height};
+}
+"""
+
+# Some lists end with a "Load more" / "Show more" button instead of loading by themselves.
+_LOAD_MORE_JS = r"""
 (sel) => {
   const rows = Array.from(document.querySelectorAll(sel));
-  if (!rows.length) return false;
   const last = rows[rows.length - 1];
-  last.scrollIntoView({block: 'end'});
-  const box = last.closest('.scroll') || last.parentElement;
-  if (box) box.scrollTop = box.scrollHeight;
-  return true;
+  const re = /^\s*(load|show|see|view)\s+(more|older|next)\b|^\s*more\s*(listings|results|shops)?\s*$/i;
+  // look around the list, nearest first: the button usually sits just under it
+  let node = last ? last.parentElement : null;
+  for (let up = 0; up < 6 && node; up++, node = node.parentElement) {
+    for (const b of node.querySelectorAll('button, a, [role="button"]')) {
+      if (!(b.offsetWidth || b.offsetHeight) || b.disabled) continue;
+      if (re.test((b.innerText || b.textContent || '').trim())) { b.click(); return true; }
+    }
+  }
+  return false;
+}
+"""
+
+# The right-hand panel: every visible heading outside the item table / ticker, with the icon nearest to it.
+_DETAIL_JS = r"""
+() => {
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const skip = e => e.closest('table, .megaphone, [class*="ticker"], #ticker, nav, footer');
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const urlOf = el => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'img') return el.currentSrc || el.getAttribute('src') || '';
+    if (tag === 'image' || tag === 'use') return el.getAttribute('href') || el.getAttribute('xlink:href') || '';
+    const bg = getComputedStyle(el).backgroundImage;
+    const m = bg && bg !== 'none' && /url\(["']?([^"')]+)["']?\)/.exec(bg);
+    return m ? m[1] : '';
+  };
+  const iconNear = h => {
+    let node = h;
+    for (let up = 0; up < 4 && node; up++, node = node.parentElement) {
+      if (node.matches('body, main') || node.querySelector('table, .megaphone, li.buy-row, ul.buy-list')) break;
+      for (const el of node.querySelectorAll('img, image, [style*="background"], [class*="icon"], [class*="thumb"], [class*="sprite"]')) {
+        const u = urlOf(el);
+        if (u && (vis(el) || el.tagName.toLowerCase() === 'image')) return {src: u, alt: el.getAttribute('alt') || el.getAttribute('title') || ''};
+      }
+    }
+    return null;
+  };
+  const sel = 'h1, h2, h3, h4, [role="heading"], [class*="detail"] [class*="title"], [class*="detail"] [class*="name"], [id*="detail"] [class*="name"]';
+  return Array.from(document.querySelectorAll(sel))
+      .filter(h => vis(h) && !skip(h) && txt(h).length > 0 && txt(h).length < 160)
+      .slice(0, 10).map(h => ({text: txt(h), icon: iconNear(h)}));
 }
 """
 
@@ -214,6 +293,8 @@ class BrowserSource:
 
     min_interval_ms = 500
     last_candidates: list = []
+    last_panels: list = []
+    items = None  # optional ItemDB: lets the right-hand icon be checked against the item's id
 
     def pause_s(self) -> float:
         """Random pause between passes (500-5000 ms by default)."""
@@ -226,6 +307,8 @@ class BrowserSource:
         self._profile = profile_dir
         self._pw = self._ctx = self._page = None
         self._cycles = 0
+        self.scroll_info: dict = {}
+        self.match_info = ""
 
     # ---- helpers
     @property
@@ -345,14 +428,52 @@ class BrowserSource:
         but every word and number must match (so "Chaos" never equals "Intermediate")."""
         return norm(s.replace(" ", " "))
 
+    def _icon_verdict(self, icon: Optional[dict], want: str) -> Optional[bool]:
+        """Does the icon in the right-hand panel belong to the wanted item? True / False, or None when it
+        cannot be told (no icon, no item id in its file name, or an id this program does not know)."""
+        if not icon or self.items is None:
+            return None
+        for iid in icon_ids(icon.get("src", "")):
+            it = self.items.items.get(iid.zfill(8))
+            if it:
+                return self._key(it["name"]) == want
+        return None
+
+    @staticmethod
+    def _shown(heads: list) -> str:
+        return " | ".join(h["text"] for h in heads[:3])
+
+    def _panel_heads(self, page) -> list:
+        try:
+            return page.evaluate(_DETAIL_JS) or []
+        except Exception:
+            return []
+
+    def _panel_matches(self, page, want: str) -> tuple[bool, str]:
+        """Is the item shown in the right-hand panel the wanted one? Needs the heading to read exactly
+        like the wanted name and, when the icon can be compared, the icon to be that item's too."""
+        heads = self._panel_heads(page)
+        shown = self._shown(heads)
+        for h in heads:
+            if self._key(h["text"]) != want:
+                continue
+            verdict = self._icon_verdict(h.get("icon"), want)
+            if verdict is False:
+                self.match_info = "name matched but the icon belongs to another item"
+                return False, f"{h['text']} (wrong icon)"
+            self.match_info = {True: "name and icon match", None: "name matches (icon cannot be compared)"}[verdict]
+            return True, shown
+        return False, shown
+
     def _select_item(self, page, name: str) -> Optional[str]:
-        """Type the full name in the filter box and click the row whose name is EXACTLY that item.
-        Never clicks a "close enough" first result. Clicks only inside the item table (the page also
-        shows item names in a ticker and a header). Returns the text used, or None."""
+        """Type the full name in the filter box, then open search results one after the other until the
+        RIGHT-HAND PANEL shows the wanted item: its heading reads exactly like the name and its icon is that
+        item's icon. A result that opens something else is skipped. Clicks only inside the item table (the page
+        also shows item names in a ticker and a header). Returns the text used, or None."""
         box = self._filter_box(page)
         sel = (self.bc.get("item_selector") or "").strip()
         want = self._key(name)
-        self.last_candidates = []
+        self.last_candidates, self.last_panels, self.match_info = [], [], ""
         box.fill(name.strip())
         self._delay(0.6)
         self._clear_challenge(page)
@@ -363,11 +484,23 @@ class BrowserSource:
             pool = page.get_by_text(re.compile(re.escape(name.strip()), re.I))
         texts = [t.strip() for t in pool.all_inner_texts()]
         self.last_candidates = [t for t in texts if t][:5]
-        for i, t in enumerate(texts):
-            if self._key(t) == want:
-                pool.nth(i).click()
-                self._delay()
+        # a result whose text already equals the name is the likeliest, so it is tried first; every result is verified
+        order = [i for i, t in enumerate(texts) if self._key(t) == want] + \
+                [i for i, t in enumerate(texts) if self._key(t) != want]
+        for i in order[:MAX_RESULTS_TRIED]:
+            before = self._shown(self._panel_heads(page))
+            pool.nth(i).click()
+            self._delay(0.3)  # the usual random pause after a click
+            t0 = time.time()
+            while True:  # the panel may take a moment to show the clicked item
+                ok, shown = self._panel_matches(page, want)
+                if ok or shown != before or time.time() - t0 > 2.0:
+                    break  # matched, or the panel now shows something else, or we waited long enough
+                time.sleep(0.25)
+            if ok:
                 return name.strip()
+            self.last_panels.append(shown or "(nothing)")
+            self._clear_challenge(page)
         return None
 
     def _typical(self, page, used: str) -> Optional[float]:
@@ -404,24 +537,58 @@ class BrowserSource:
                     self._delay(0.6)
         return False
 
-    def _scroll_list(self, page, sel: str) -> bool:
-        """Scroll the Newest list to its bottom with JavaScript (no real mouse wheel is involved)."""
+    def _row_signature(self, page, sel: str) -> tuple:
+        """(row count, text of the last row): changes when the site appends or swaps rows."""
         try:
-            return bool(page.evaluate(_SCROLL_LIST_JS, sel or "li.buy-row"))
+            rows = page.evaluate(_READ_ROWS_JS, sel)
         except Exception:
-            return False
+            return (0, "")
+        return (len(rows), rows[-1]["text"] if rows else "")
+
+    def _wait_rows_change(self, page, sel: str, before: tuple, timeout: float) -> bool:
+        """Wait (polling) for the site to load more rows after a scroll; True as soon as it did."""
+        end = time.time() + timeout
+        while time.time() < end:
+            time.sleep(0.25)
+            if self._row_signature(page, sel) != before:
+                return True
+        return False
+
+    def _nudge(self, page, sel: str, pos: dict) -> bool:
+        """The list is at its bottom and nothing new came. Try what a person would: roll the mouse wheel over
+        the list, and press a 'Load more' button if there is one. True if either was done."""
+        did = False
+        try:
+            if pos.get("w"):
+                page.mouse.move(pos["x"], pos["y"])  # the page's own pointer; your real mouse is not touched
+                page.mouse.wheel(0, 600)
+                did = True
+        except Exception:
+            pass
+        try:
+            did = bool(page.evaluate(_LOAD_MORE_JS, sel)) or did
+        except Exception:
+            pass
+        return did
 
     def _read_rows(self, page) -> list[dict]:
-        """Read the Newest list, scrolling down until listings are older than the look-back window
-        (default 3 hours), the list stops growing, or the safety cap is reached."""
+        """Read the Newest list, scrolling down a screen at a time until listings are older than the look-back
+        window (default 3 hours), the list really ends, or the safety cap is reached. At the bottom it waits for
+        the site to load more (it can take seconds), then rolls the wheel / presses 'Load more', and only after
+        two such tries calls it the end. What happened is kept in self.scroll_info for the Test report."""
         sel = (self.bc.get("row_selector") or "").strip()
         lookback = float(self.bc.get("lookback_min", 180))
         cap = int(self.bc.get("listing_cap", 200))
+        max_steps = max(int(self.bc.get("max_scrolls", 40)), 40) * 4
         out: list[dict] = []
         seen: set = set()
-        for step in range(int(self.bc.get("max_scrolls", 40)) + 1):
-            new, reached_old = 0, False
+        info = {"steps": 0, "loads": 0, "rows": 0, "container": "", "stop": ""}
+        self.scroll_info = info
+        stalls = 0
+        for step in range(max_steps + 1):
+            reached_old, total = False, 0
             for r in page.evaluate(_READ_ROWS_JS, sel):
+                total += 1
                 p = parse_listing_text(r["text"], r.get("titles") or ())
                 if not p:
                     continue
@@ -432,19 +599,52 @@ class BrowserSource:
                 if k not in seen:
                     seen.add(k)
                     out.append(p)
-                    new += 1
-            if reached_old or len(out) >= cap or (step > 0 and new == 0):
+            info["rows"] = max(info["rows"], total)
+            if reached_old:
+                info["stop"] = "reached listings older than the look-back window"
                 break
-            if not self._scroll_list(page, sel):
+            if len(out) >= cap:
+                info["stop"] = "reached the safety cap"
                 break
-            self._delay(0.1)  # just long enough for lazy-loaded rows to appear
+            if step == max_steps:
+                info["stop"] = "reached the scroll limit"
+                break
+            before = self._row_signature(page, sel)
+            try:
+                pos = page.evaluate(_SCROLL_STEP_JS, [sel or "li.buy-row", 0.9])
+            except Exception:
+                pos = None
+            if not pos:
+                info["stop"] = "no rows to scroll"
+                break
+            info["steps"] += 1
+            info["container"] = pos["tag"]
+            if pos["moved"] > 1 and not pos["atBottom"]:
+                time.sleep(random.uniform(0.15, 0.35))  # moving through rows that are already loaded
+                stalls = 0
+                continue
+            grew = self._wait_rows_change(page, sel, before, 3.0)  # at the bottom: let the site load more
+            if not grew and self._nudge(page, sel, pos):
+                grew = self._wait_rows_change(page, sel, before, 2.5)
+            if grew:
+                info["loads"] += 1
+                stalls = 0
+                self._delay(0.1)
+                continue
+            stalls += 1
+            if stalls >= 2:
+                info["stop"] = "the list stopped growing (end of the Newest list)"
+                break
         return out[:cap]
 
     def _monitor(self, page, name: str) -> tuple[list[Listing], str]:
         used = self._select_item(page, name)
         if not used:
-            near = ", ".join(self.last_candidates[:3])
-            return [], "no item with exactly this name on the site" + (f" (saw: {near})" if near else "")
+            if not self.last_candidates:
+                return [], "no item with exactly this name on the site"
+            shown = "; ".join(self.last_panels[:3])
+            return [], (f"none of the {len(self.last_panels)} search results opened this item "
+                        f"(the right-hand panel showed: {shown})")
         typical = self._typical(page, used)
         if not self._open_newest(page):
             return [], "could not open the Newest list"
@@ -506,10 +706,13 @@ class BrowserSource:
             used = self._select_item(page, name)
             if not used:
                 near = ", ".join(self.last_candidates[:3])
-                log.append(f"FAIL No item named exactly '{name}' in the item list"
-                           + (f" (the site showed: {near})." if near else "."))
+                if not self.last_candidates:
+                    log.append(f"FAIL The site showed no search result for '{name}'.")
+                else:
+                    log.append(f"FAIL Opened {len(self.last_panels)} search result(s) ({near}) but the right-hand "
+                               f"panel never showed '{name}'. It showed: {'; '.join(self.last_panels[:4])}.")
                 return log
-            log.append(f"OK  Clicked item (searched '{used}')")
+            log.append(f"OK  Opened the item (searched '{used}'; right-hand panel: {self.match_info})")
             typ = self._typical(page, used)
             log.append(f"{'OK ' if typ else 'WARN'} Typical price: {typ:,.0f}" if typ
                        else "WARN Typical price not found (Discount column will be blank)")
@@ -518,6 +721,10 @@ class BrowserSource:
                 return log
             log.append(f"OK  '{self.bc['newest_label']}' list open")
             rows = self._read_rows(page)
+            si = self.scroll_info
+            log.append(f"OK  Scrolled the Newest list {si.get('steps', 0)} time(s) in '{si.get('container') or '?'}': "
+                       f"{si.get('rows', 0)} rows seen, {si.get('loads', 0)} time(s) the site loaded more; "
+                       f"stopped because {si.get('stop') or '?'}")
             look = int(self.bc.get("lookback_min", 180))
             if rows:
                 log.append(f"OK  Read {len(rows)} listing(s) from the last {look} minutes (scrolled the Newest list)")
