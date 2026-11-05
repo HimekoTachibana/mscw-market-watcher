@@ -296,8 +296,8 @@ def prepare(rel: Release, target: Path, running_exe: Optional[str] = None, platf
 
 
 _SH = """#!/bin/sh
-# args: PID OLD NEW DEST LAUNCH_NEW LAUNCH_OLD STAGE
-PID="$1"; OLD="$2"; NEW="$3"; DEST="$4"; LNEW="$5"; LOLD="$6"; STAGE="$7"
+# args: PID OLD NEW DEST LAUNCH_NEW LAUNCH_OLD STAGE MODE   (MODE: open = macOS .app, exec = plain program)
+PID="$1"; OLD="$2"; NEW="$3"; DEST="$4"; LNEW="$5"; LOLD="$6"; STAGE="$7"; MODE="$8"
 cd "${TMPDIR:-/tmp}" 2>/dev/null || cd /
 alive() {  # running, and not just a zombie waiting for its parent to collect it
   kill -0 "$PID" 2>/dev/null || return 1
@@ -310,7 +310,7 @@ while alive; do
   sleep 0.5
 done
 launch() {
-  if [ "$(uname)" = "Darwin" ]; then open -n "$1"; else nohup "$1" >/dev/null 2>&1 & fi
+  if [ "$MODE" = "open" ]; then open -n "$1"; else nohup "$1" >/dev/null 2>&1 & fi
 }
 rm -rf "$OLD.old"
 if mv "$OLD" "$OLD.old" 2>/dev/null; then
@@ -382,6 +382,8 @@ def start_helper(plan: Plan, pid: Optional[int] = None, platform: Optional[str] 
         f.write(_BAT if win else _SH)
     args = [str(pid), str(plan.old), str(plan.new), str(plan.dest), str(plan.launch_new),
             str(plan.launch_old), str(plan.stage)]
+    if not win:
+        args.append("open" if p == "darwin" else "exec")
     common = dict(cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL, close_fds=True)
     if win:

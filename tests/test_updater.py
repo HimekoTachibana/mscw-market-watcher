@@ -299,5 +299,18 @@ def test_helper_scripts_use_expected_arguments():
     for n in range(1, 8):
         assert f"%~{n}" in updater._BAT
     assert 'del "%~f0"' in updater._BAT and "move \"%NEW%\" \"%DEST%\"" in updater._BAT
-    for n in range(1, 8):
+    for n in range(1, 9):
         assert f'"${n}"' in updater._SH
+
+
+def test_helper_launch_mode_follows_platform_argument(monkeypatch, tmp_path):
+    """macOS starts the new .app with 'open'; everything else runs the program directly. Decided by the caller,
+    not by sniffing the OS inside the script, so it behaves the same wherever it runs."""
+    seen = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: seen.append(args))
+    plan = updater.Plan("v1", tmp_path / "s", tmp_path / "o", tmp_path / "n", tmp_path / "d", tmp_path / "ln",
+                        tmp_path / "lo")
+    updater.start_helper(plan, pid=1, platform="darwin")
+    updater.start_helper(plan, pid=1, platform="linux")
+    assert seen[0][-1] == "open" and seen[1][-1] == "exec"
+    assert len(seen[0]) == 10  # /bin/sh, script, then eight arguments
