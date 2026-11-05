@@ -729,4 +729,4 @@ def test_closing_the_window_is_not_a_completed_check(src):
     with pytest.raises(core.ChallengeDetected) as e:
         src._clear_challenge(ClosedPage(), Resp())
     assert "closed before the Cloudflare check was completed" in str(e.value)
-    assert "was completed\n" not in "\n".join(errorlog.trail()) + "\n"
+    assert not any(ln.endswith("] The Cloudflare check was completed") for ln in errorlog.trail())
