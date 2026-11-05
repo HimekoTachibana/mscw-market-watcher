@@ -632,3 +632,12 @@ def test_scrolling_stops_at_the_show_listings_from_the_last_limit(fsn, site):
     assert len(ls) == 29 and max(l.age_min for l in ls) == 58  # the "1h ago" row is not inside a 1 hour window
     si = fsn.scroll_info
     assert "older than the look-back" in si["stop"] and si["loads"] <= 3  # it did not keep loading all 60 rows
+
+
+def test_hidden_status_text_is_never_the_location():
+    t = "ColdMomill\nCH 34\u00a0\u00b7 3m ago\nLikely still up\n40K\nDeal -5%"
+    p = browser.parse_listing_text(t, ["", "999,999 mesos"][:1])
+    assert p["seller"] == "ColdMomill" and p["channel"] == "34" and p["location"] == "" and p["price"] == 40000
+    p = browser.parse_listing_text("Oxin\nKerning City Constru\u2026CH 30 \u00b7 22m ago\nSeller not confirmed\n180K", [])
+    assert p["location"].startswith("Kerning City")
+    assert not core.has_place(p["channel"], "")

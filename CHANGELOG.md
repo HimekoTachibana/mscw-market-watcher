@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.4 - 2026-11-05
+- Fixed "Likely still up" showing in the Location column. That is hidden status text the site adds to every
+  row; for shops that show a channel but no map it was mistaken for the location. It (and "Seller not
+  confirmed", and the price tags such as "High +18%" / "Deal -5%") is now ignored, so those listings have an
+  empty Location and are hidden by "Only listings with Channel and Location".
+- Settings > Test also shows what the site says about its own freshness ("updated 5m ago").
+
 ## v0.5.3 - 2026-11-05
 - Scrolling stops as soon as a listing is older than **Show listings from the last** (the box in the main
   window). The site rounds hours down ("1h ago" may be 1h59m), so a row that shows exactly the limit now counts

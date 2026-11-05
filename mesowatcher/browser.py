@@ -31,6 +31,9 @@ _CH_RE = re.compile(r"(?<![A-Za-z])CH\s*\.?\s*(\d+)(?!\d)", re.I)
 _FM_RE = re.compile(r"(?<![A-Za-z])FM\s*(\d+)(?!\d)", re.I)
 _PRICE_RE = re.compile(r"(\d[\d.,]*\s*[KMB]?)\s*each\b", re.I)
 _BARE_PRICE_RE = re.compile(r"(?m)^[ \t]*(\d[\d.,]*[ \t]*[KMB]?)[ \t]*$", re.I)  # "For sale now" rows: the price alone on a line
+# hidden status text the site puts in every row for screen readers ("Likely still up", "Seller not confirmed"); never a place
+_STATUS_RE = re.compile(r"still\s+up|not\s+confirmed|unconfirmed|may\s+have\s+(?:closed|moved)|(?:likely|probably)\s+(?:closed|gone)", re.I)
+_TAG_RE = re.compile(r"%|^(?:fair|deal|high|low)$", re.I)  # price tags: "High +18%", "Deal -5%", "Fair"
 _TYPICAL_RE = re.compile(r"^\d[\d.,]*\s*[KMB]?$", re.I)
 _SEEN_RE = re.compile(r"seen\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s+(\d{1,2}):(\d{2})\s*([AP]M)", re.I)
 _MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -110,7 +113,8 @@ def parse_listing_text(text: str, titles=(), now: Optional[datetime] = None) -> 
     for a, b in sorted((m.span() for m in (pm, ch, fm, ago) if m), reverse=True):
         rest = rest[:a] + "\n" + rest[b:]
     left = [ln.strip(" \t-") for ln in rest.splitlines()]
-    left = [ln for ln in left if re.search(r"\w", ln)]  # drops empty lines and status dots
+    left = [ln for ln in left if re.search(r"\w", ln) and not _STATUS_RE.search(ln)
+            and not _TAG_RE.search(ln)]  # drops empty lines, dots, status text, price tags
     seller = left[0] if left else ""
     loc_text = left[1] if len(left) > 1 else ""
     if loc_text.endswith(("…", "...")):  # truncated badge: the full text is often in a title
@@ -816,6 +820,14 @@ class BrowserSource:
                 log.append(f"FAIL Could not find the '{self.bc['newest_label']}' button/list.")
                 return log
             log.append(f"OK  '{self.bc['newest_label']}' list open")
+            try:
+                upd = page.evaluate("() => { const e = document.querySelector('.fsn-upd'); "
+                                    "return e ? (e.innerText + ' | ' + (e.getAttribute('title') || '')) : ''; }")
+            except Exception:
+                upd = ""
+            if upd:
+                log.append(f"OK  The site says: {upd.strip()} (listing ages are read as shown; the program then "
+                           "adds the time that passes after each reading)")
             rows = self._read_rows(page)
             si = self.scroll_info
             log.append(f"OK  Scrolled the Newest list {si.get('steps', 0)} time(s) in '{si.get('container') or '?'}': "
