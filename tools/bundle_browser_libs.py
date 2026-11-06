@@ -28,9 +28,14 @@ for line in cache.splitlines():
     if m and ("x86-64" in m.group(2) or "aarch64" in m.group(2)):
         found.setdefault(m.group(1), m.group(3))
 
+# NSS's plugin modules (softokn3, freebl3) are loaded at run time, so Debian keeps them in a "nss" subfolder that
+# the ldconfig cache does not list. They are shipped next to libnss3, where NSS looks first.
+EXTRA_DIRS = ("/usr/lib/x86_64-linux-gnu/nss", "/usr/lib/aarch64-linux-gnu/nss", "/usr/lib64/nss", "/usr/lib/nss",
+              "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib")
+
 missing = []
 for name in BUNDLED_LIBS:
-    src = found.get(name)
+    src = found.get(name) or next((str(Path(d) / name) for d in EXTRA_DIRS if (Path(d) / name).exists()), None)
     if not src:
         missing.append(name)
         continue
