@@ -224,6 +224,12 @@ def main(argv: list[str]) -> int:
                 src.close()
         except Exception as e:
             rec("FAIL", "browser", f"{type(e).__name__}: {str(e)[:400]}")
+            try:  # what the browser start did, e.g. which of the program's own libraries it used
+                from . import errorlog
+                for line in errorlog.trail()[-8:]:
+                    rec("INFO", "browser log", line[:300])
+            except Exception:
+                pass
 
     shutil.rmtree(tmp, ignore_errors=True)
     print("SELFTEST RESULT: " + ("OK" if not failed else "FAILED (" + ", ".join(failed) + ")"), flush=True)

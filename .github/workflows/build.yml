@@ -179,7 +179,7 @@ jobs:
             prep: dnf install -y gtk3 mesa-libgbm alsa-lib xorg-x11-server-Xvfb tar gzip findutils
           - distro: openSUSE Tumbleweed
             image: opensuse/tumbleweed:latest
-            prep: zypper -n install libgtk-3-0 libgbm1 libasound2 xorg-x11-server-Xvfb tar gzip findutils
+            prep: zypper -n install libgtk-3-0 libgbm1 libasound2 xorg-x11-server-Xvfb dejavu-fonts tar gzip findutils
           - distro: Arch Linux
             image: archlinux:latest
             prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
@@ -229,7 +229,14 @@ jobs:
           echo "--- libraries it cannot find on this system:"
           ldd "$chrome" | grep "not found" || echo "(none)"
           echo "--- starting it directly:"
-          "$chrome" --headless --no-sandbox --disable-gpu --dump-dom 'data:text/html,<p>ok</p>' 2>&1 | tail -40 || true
+          "$chrome" --headless --no-sandbox --disable-gpu --dump-dom 'data:text/html,<p>ok</p>' 2>&1 | tail -20 || true
+          echo "--- starting it with the program's fallback libraries (as the program does):"
+          libs=$(find app -type d -name browser-libs | head -1)
+          mkdir -p fb/nss
+          for f in "$PWD/$libs"/*; do ln -sf "$f" fb/; done
+          for m in libsoftokn3.so libfreebl3.so libfreeblpriv3.so; do ln -sf "$PWD/$libs/$m" fb/nss/; done
+          LD_LIBRARY_PATH="$PWD/fb" "$chrome" --headless --no-sandbox --disable-gpu --dump-dom \
+            'data:text/html,<p>ok</p>' 2>&1 | tail -30 || true
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)

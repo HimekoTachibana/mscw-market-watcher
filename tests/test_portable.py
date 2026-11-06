@@ -35,11 +35,13 @@ def test_only_missing_libraries_are_linked_and_nss_stays_together(shipped, tmp_p
         return ["libcups.so.2", "libnss3.so"] if not extra else []
     monkeypatch.setattr(portable, "missing_libs", fake)
     env, still = portable.browser_env("/x/chrome", tmp_path / "active")
-    linked = sorted(p.name for p in (tmp_path / "active").iterdir())
+    linked = sorted(p.name for p in (tmp_path / "active").iterdir() if p.is_file())
     assert linked == sorted(set(portable.NSS_GROUP) | {"libcups.so.2"})  # not libatk etc.: the system has those
     assert "libXext.so.6" not in linked
     assert env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(tmp_path / "active")
     assert still == [] and calls[-1] == str(tmp_path / "active")
+    nss = sorted(p.name for p in (tmp_path / "active" / "nss").iterdir())
+    assert nss == sorted(portable.NSS_MODULES)  # also where Debian's NSS looks for its crypto modules
 
 
 @linux_only

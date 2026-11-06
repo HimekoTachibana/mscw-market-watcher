@@ -23,6 +23,8 @@ from typing import Optional
 # Libraries that are linked as a group: NSS loads its helper modules from the folder libnss3 came from.
 NSS_GROUP = ("libnss3.so", "libnssutil3.so", "libsmime3.so", "libsoftokn3.so", "libfreebl3.so",
              "libfreeblpriv3.so", "libnspr4.so", "libplc4.so", "libplds4.so")
+# NSS's crypto modules, loaded at run time (not linked): Debian's NSS looks for them in an "nss" subfolder.
+NSS_MODULES = ("libsoftokn3.so", "libfreebl3.so", "libfreeblpriv3.so")
 # What the Linux build copies into browser-libs (tools/bundle_browser_libs.py). Nothing driver- or
 # sound-specific, nothing every desktop has anyway (glibc, X11/xcb, glib, cairo, pango, dbus).
 BUNDLED_LIBS = NSS_GROUP + ("libcups.so.2", "libatk-1.0.so.0", "libatk-bridge-2.0.so.0", "libatspi.so.0",
@@ -118,6 +120,7 @@ def browser_env(exe: str, work_dir: Path) -> tuple[Optional[dict], list[str]]:
     src = bundled_libs_dir()
     if src is None:
         return None, missing
+    src = src.resolve()  # the links must point at an absolute path
     shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     linked: set = set()
@@ -129,11 +132,15 @@ def browser_env(exe: str, work_dir: Path) -> tuple[Optional[dict], list[str]]:
         if not new:
             break
         for n in new:
-            target = work_dir / n
-            try:
-                target.symlink_to(src / n)
-            except OSError:
-                shutil.copy2(src / n, target)
+            targets = [work_dir / n]
+            if n in NSS_MODULES:  # Debian-built NSS (what the Linux download ships) loads these from "nss/"
+                (work_dir / "nss").mkdir(exist_ok=True)
+                targets.append(work_dir / "nss" / n)
+            for target in targets:
+                try:
+                    target.symlink_to(src / n)
+                except OSError:
+                    shutil.copy2(src / n, target)
             linked.add(n)
         missing = missing_libs(exe, str(work_dir))
         if not missing:
