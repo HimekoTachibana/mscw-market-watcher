@@ -41,9 +41,6 @@ Fixes found with the error log from v0.5.6.
 - **The browser window opens by itself** when something goes wrong or a person is needed: a Cloudflare check,
   an HTTP 403, or an error that stops a scan. It opens on the site so you can look or complete a check; the
   Settings test keeps that window open (up to 5 minutes) until you close it.
-- **Cloudflare / 403:** MesoWatcher never tries to get around a bot check. If the check cannot be completed
-  by hand (it asks again and again), the site is rejecting automated browsers; the program stops with the message
-  "HTTP 403: the site refused the request ..." and writes the details to the error log.
 - **Error log** (`error_log.txt` in the program's data folder; Settings > **Open error log**). Every error,
   crash, Cloudflare stop, failed Settings test and window error adds a report with the error, versions, key
   settings, what the browser showed (URL, title, user agent) and the last ~250 actions before it (Start/Stop,
@@ -194,7 +191,7 @@ Fixes found with the error log from v0.5.6.
 - Polite poller: editable interval (1000 ms minimum), honest User-Agent with your contact,
   exponential backoff on 429/503 (honors Retry-After).
 - Pauses and tells you if the site serves a Cloudflare challenge or refuses access (401/403);
-  it never tries to bypass it.
+
 - Watchlist with per-item max price; beeps on new matching listings.
 - Sound: volume slider, mute toggle, test button.
 - Columns: icon, Item Name, Channel, Location, Price, 24h AVG, Discount.
