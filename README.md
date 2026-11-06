@@ -13,6 +13,7 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
 * **Resize:** drag the bar between the Live Feed and the Watchlist up or down.
 * **Watchlist:** double-click a max price to edit it; select an item and press **Delete** to remove it.
   **Show listings from the last** sets the time window (also how far the Newest list is scrolled).
+* **Pause / Resume:** press **Pause** beside Start to let the current scan finish and then hold polling; press **Resume** to continue the same session. **Stop** ends monitoring and closes the browser.
 * Listings are saved, so they are still there after Stop/Start or restarting; they drop off once they
   are older than the chosen window and the Listed time counts up every minute.
 * **Background:** the browser runs headless (no window). It never uses your mouse, keyboard or focus,
