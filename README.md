@@ -34,11 +34,11 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
    list opened, N listings read). It also saves the rendered page so labels can be adjusted without
    guessing (the file path is shown; share it if you want help).
 4. Press **Start**. A pass visits each watched item with random pauses between actions and between
-   passes (500-5000 ms by default, range editable in Settings, never under 0.5 s), like a person browsing.
+   passes (500-5000 ms by default, range editable in Settings, never under 0.5 s).
 
 ### How it behaves
-* It is a normal Edge/Chrome browser (Playwright) with its own saved profile. No stealth tricks,
-  no fingerprint spoofing, no CAPTCHA solving. Only the pages you approved with the site owners.
+* It is a normal Edge/Chrome browser (Playwright) with its own saved profile. It accesses only the pages
+  you approved with the site owners.
 * **Cloudflare check:** if one appears, monitoring **stops**. Tick **Show the browser window** in
   Settings, press Start and complete the check yourself; it continues when the page loads.
 * Rows are recognised by their visible text (a price followed by "each", "3m ago", "CH 14", "FM5"),
