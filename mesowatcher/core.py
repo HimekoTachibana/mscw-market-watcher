@@ -763,7 +763,7 @@ class ItemDB:
     def _get(self, url: str) -> requests.Response:
         r = requests.get(url, timeout=45, headers={"User-Agent": user_agent(self.cfg)})
         if r.status_code in (401, 403, 429, 503) or "just a moment" in r.text[:600].lower():
-            raise RuntimeError(f"HTTP {r.status_code}: the site refused automated access, skipped")
+            raise RuntimeError(f"HTTP {r.status_code}: the site refused the request, skipped")
         r.raise_for_status()
         return r
 
