@@ -111,6 +111,10 @@ jobs:
         run: python -m pip install -r requirements.txt pyinstaller pytest
 
       - name: Chromium shipped inside the program
+        # Playwright's installer only knows newer Debian releases by name; the Linux Chromium build is the same for
+        # all of them (it needs glibc 2.25), so download that one. The tests below then run it on this machine.
+        env:
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian12-x64
         run: python -m playwright install --no-shell chromium
 
       - name: Check tag matches VERSION
