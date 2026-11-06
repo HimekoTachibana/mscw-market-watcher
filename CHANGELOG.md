@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.6.0 - 2026-11-06
+Lighter on meso.watch: fewer requests, and the program now notices when the site asks it to slow down.
+- **Rate limits are seen on every request.** Until now a 429/503 was only noticed when a whole page was loaded.
+  The requests the site's page makes by itself after a click or a scroll were not checked, so the program kept
+  clicking while the site was already saying "slow down". Now every response from the site is watched; a 429 or
+  503 stops the step at once and the program waits for the site's Retry-After (seconds or a date), then backs off
+  from 1 minute, doubling up to 1 hour, with a little randomness. Answers from other sites are ignored, and
+  Cloudflare check pages are still handled as checks.
+- **Headless by default.** Background work now runs in a real headless browser (no window, not an off-screen
+  window), also in the rotating mode. A window still opens by itself when a Cloudflare check or a refused
+  request needs you. The browser's normal background throttling is no longer switched off.
+- **One page is the default scan.** All watched items are read in one pass on one page, then the program waits
+  **3-5 minutes** (Settings, never under 60 s) instead of 0.5-5 s. Rotating windows is still available, but every
+  page it keeps open refreshes itself, so it is no longer recommended. Its delay between items is now 20-40 s by
+  default and never under 10 s.
+- **Each item at most once every 3 minutes** (Settings, never under 60 s), in both modes. In the rotating mode an
+  item that was read recently is skipped until it is due; Watch only's click refresh obeys it too.
+- **15-minute cool-down after a Cloudflare check** before the next read (config `challenge_cooldown_s`).
+- **Errors no longer restart the browser.** An ordinary error is logged and retried after the backoff (from
+  1 minute instead of 10 s); the browser is not closed, reopened and pointed at the site again. A window is still
+  opened for checks, refused requests and a failed Settings test.
+- The page is reloaded at most every 2 hours (was every 10 passes).
+- **Settings saved by older versions are updated once** to headless + one page, and a delay between items shorter
+  than 20-40 s is raised. You can change them back in Settings.
+- Tests: rate limit seen on a background request (with Retry-After), other sites' 429s ignored, Cloudflare check
+  pages not counted as rate limits, the cool-down, the per-item floor, the pause between passes, no browser restart
+  after an error, headless mode and the one-time settings update.
+
 ## v0.5.9 - 2026-11-05
 - **Rotating windows (new default way of scanning).** Every watched item now gets its own real browser window
   (no headless browser). The program opens a window for an item, searches it, checks the right item is

@@ -231,6 +231,15 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/api/limited"):  # what a rate-limited background request looks like
+            body = b'{"error":"rate limited"}'
+            self.send_response(429)
+            self.send_header("Retry-After", "42")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/pass403"):  # like Cloudflare: the check page is answered with 403, then the site loads
             body = (b"<!doctype html><title>Just a moment...</title><p>Checking</p>"
                     b"<script>setTimeout(()=>{location.href='/fsn'},1500)</script>")
@@ -668,15 +677,34 @@ def _private_data_dir(tmp_path, monkeypatch):
     errorlog.clear()
 
 
+@pytest.fixture()
+def no_floors(monkeypatch):
+    """Lets tests step through items without the production waits (60 s per item, 10 s between items)."""
+    monkeypatch.setattr(core, "ITEM_REVISIT_FLOOR_S", 0.0)
+    monkeypatch.setattr(core, "ROTATE_MIN_S", 1.0)
+
+
 needs_screen = pytest.mark.skipif(not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"),
                                   reason="needs a screen (run under xvfb-run)")
 
 
-@needs_screen
-def test_background_runs_in_an_off_screen_window_and_scrapes(fsn):
+def test_background_runs_in_a_real_headless_browser_and_scrapes(fsn):
     assert len(fsn.fetch()) == 60
-    assert fsn.mode == "background (off-screen window)"
-    assert fsn._page.evaluate("[window.screenX, window.screenY]")[0] < -1000  # far off-screen
+    assert fsn.mode == "background (headless)" and fsn.background
+
+
+def test_windows_mode_reads_each_item_at_most_once_per_revisit_time(src, site):
+    """Headless works for the rotating mode too, and an item read a moment ago is not read again."""
+    src.close()
+    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", scan_mode="windows")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Decoy 0", "max_price": None},
+                            {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert len(src.fetch()) == 60 and len(src.fetch()) == 60  # both set up
+    for s in src._sessions.values():
+        s.page.evaluate("window.__clicks = 0")
+    assert src.fetch() == [] and "every item was read in the last" in src.note
+    assert all(s.page.evaluate("window.__clicks") == 0 for s in src._sessions.values())
+    assert 170 <= src.pause_s() <= 180 + 40  # waits until the first item is due again (default 180 s)
 
 
 @needs_screen
@@ -737,23 +765,88 @@ def test_closing_the_window_is_not_a_completed_check(src):
 
 # ---- windows mode: one browser window per watched item, taken in turns
 @pytest.fixture()
-def win(src, site):
+def win(src, site, no_floors):
     """The same browser, in windows mode (needs a screen: the item windows are real windows)."""
     src.close()
+    src.cfg["item_revisit_min_s"] = 0
     src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", headless=False, scan_mode="windows")
     src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Decoy 0", "max_price": None},
                             {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
     return src
 
 
-def test_delay_between_items_is_the_users_range_clamped_to_1_600(src):
+def test_delay_between_items_is_the_users_range_clamped_to_10_600(src):
     src.cfg["browser"]["scan_mode"] = "windows"
-    for lo, hi, want in ((3, 9, (3, 9)), (0, 5000, (1, 600)), (50, 10, (50, 50)), ("x", None, (5, 20))):
+    for lo, hi, want in ((13, 19, (13, 19)), (0, 5000, (10, 600)), (50, 10, (50, 50)), ("x", None, (20, 40))):
         src.cfg["rotate_delay_min_s"], src.cfg["rotate_delay_max_s"] = lo, hi
         assert core.rotate_delay_range(src.cfg) == (float(want[0]), float(want[1]))
         assert all(want[0] <= src.pause_s() <= want[1] for _ in range(20))
+
+
+def test_one_page_mode_pauses_minutes_between_passes(src):
     src.cfg["browser"]["scan_mode"] = "single"
-    assert src.pause_s() <= 5.0  # the old behaviour: 0.5-5 s between passes
+    assert all(180 <= src.pause_s() <= 300 for _ in range(20))  # default 3-5 minutes
+    src.cfg["pass_delay_min_s"], src.cfg["pass_delay_max_s"] = 1, 2
+    src.cfg["item_revisit_min_s"] = 0
+    assert all(src.pause_s() >= 60 for _ in range(20))  # never below the floors, whatever the settings
+
+
+def test_rate_limited_background_request_stops_the_scan(fsn, site):
+    """A 429 to a request the page makes by itself (not a page load) must still stop the scan, with Retry-After."""
+    fsn.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    fsn.fetch()  # page loaded, item read
+    fsn._page.evaluate(f"fetch('{site}/api/limited').catch(() => null)")
+    fsn._page.wait_for_timeout(300)
+    with pytest.raises(core.RateLimited) as e:
+        fsn.fetch()
+    assert e.value.retry_after == 42
+    assert "asked us to slow down (HTTP 429 for /api/limited)" in "\n".join(errorlog.trail())
+
+
+def test_rate_limits_from_other_sites_are_ignored(src):
+    class Resp:
+        status, url, headers = 429, "https://example.org/x", {"retry-after": "5"}
+    src._on_response(Resp())
+    src._check_limited()  # nothing raised
+    Resp.url = src.bc["start_url"] + "api/x"
+    src._on_response(Resp())
+    with pytest.raises(core.RateLimited) as e:
+        src._check_limited()
+    assert e.value.retry_after == 5
+
+
+def test_cloudflare_check_page_is_not_counted_as_a_rate_limit(src):
+    class Resp:
+        status, headers = 503, {"cf-mitigated": "challenge"}
+    Resp.url = src.bc["start_url"]
+    src._on_response(Resp())
+    src._check_limited()  # left to the challenge handling
+
+
+def test_completed_check_starts_a_cooldown(src):
+    class Page:
+        def __init__(self):
+            self.n = 0
+
+        def is_closed(self):
+            return False
+
+        def title(self):
+            self.n += 1
+            return "Just a moment..." if self.n == 1 else "Meso Watch"
+    src.cfg["browser"].update(headless=False, challenge_wait_s=5)
+    src.cfg["browser"]["scan_mode"] = "single"
+    assert src._clear_challenge(Page()) is True
+    assert src.pause_s() >= 890  # default 15 minutes before the next read
+
+
+def test_ordinary_error_does_not_restart_the_browser(fsn, monkeypatch):
+    page = fsn._page
+    monkeypatch.setattr(fsn, "_monitor", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        fsn.fetch()
+    assert fsn._page is page and not page.is_closed()  # same browser, nothing reloaded
+    assert "Opening the browser window for you" not in "\n".join(errorlog.trail())
 
 
 @needs_screen

@@ -33,8 +33,9 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
    and tells you which step worked or failed (page opened, filter box found, item clicked, Newest
    list opened, N listings read). It also saves the rendered page so labels can be adjusted without
    guessing (the file path is shown; share it if you want help).
-4. Press **Start**. A pass visits each watched item with random pauses between actions and between
-   passes (500-5000 ms by default, range editable in Settings, never under 0.5 s).
+4. Press **Start**. A pass visits each watched item with short random pauses between actions
+   (500-5000 ms), then waits **3-5 minutes** before the next pass (editable in Settings, never under
+   60 s). No item is read more than once every 3 minutes (never under 60 s), in either scan mode.
 
 ### How it behaves
 * It is a normal Edge/Chrome browser (Playwright) with its own saved profile. It accesses only the pages
@@ -49,7 +50,14 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
   what the site showed instead, so fix the spelling in your watchlist.
 * **Browser:** Windows uses the Edge that ships with Windows. On macOS pick `chrome`; on Linux install
   Chromium once with `python -m playwright install chromium` and pick `chromium`.
-* If the site is ever blocked or slow, the pass ends with a status message and retries with backoff.
+* **Being polite to the site:** every response from meso.watch is watched, including the requests the page
+  makes in the background after a click or scroll. If the site answers **429** or **503** ("slow down"),
+  the scan stops at once and waits for the time the site asks (Retry-After), then backs off further on
+  repeats (from 1 minute, doubling, up to 1 hour). After a Cloudflare check is completed it waits 15
+  minutes before reading again. Ordinary errors are retried after a backoff without restarting the
+  browser or reloading the site.
+* **Scan modes:** **One page** (default) uses a single headless page for all items. **Rotating windows**
+  keeps a page per item open; every open page also refreshes itself, so it loads the site more.
 
 ## Run from source
 
@@ -77,24 +85,24 @@ By hand:
 ```
 git init -b main
 git add .
-git commit -m "MSCW Market Watcher v0.4.0"
+git commit -m "MSCW Market Watcher v0.6.0"
 git remote add origin https://github.com/YOUR_NAME/mscw-market-watcher.git
 git push -u origin main --tags
 ```
 
 ## Build Windows / Linux / macOS programs
 
-Every build is named with the version, e.g. **MSCW Market Watcher v0.4.0** (the folder and the
+Every build is named with the version, e.g. **MSCW Market Watcher v0.6.0** (the folder and the
 program inside it). The version comes from `VERSION` in `mesowatcher/core.py`.
 
 * **Windows:** install Python 3.12 (tick "Add to PATH"), then double-click `build_windows.bat`.
-  Result: `dist\MSCW Market Watcher v0.4.0\MSCW Market Watcher v0.4.0.exe` (plus a zip in `release\`).
+  Result: `dist\MSCW Market Watcher v0.6.0\MSCW Market Watcher v0.6.0.exe` (plus a zip in `release\`).
   It uses the Edge already on Windows.
 * **Linux:** `sudo apt install python3-tk python3-venv alsa-utils`, then `./build_linux.sh`.
-  Result: `dist/MSCW Market Watcher v0.4.0/` and a `.tar.gz` in `release/`. Run
+  Result: `dist/MSCW Market Watcher v0.6.0/` and a `.tar.gz` in `release/`. Run
   `python -m playwright install chromium` once (the script prints the exact command) and pick
   `chromium` in Settings.
-* **macOS:** `./build_macos.sh`, result `dist/MSCW Market Watcher v0.4.0.app` (unsigned: right-click -> Open).
+* **macOS:** `./build_macos.sh`, result `dist/MSCW Market Watcher v0.6.0.app` (unsigned: right-click -> Open).
 * **All three automatically:** push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The GitHub
   Actions workflow builds Windows, Linux and macOS, runs the tests, and attaches the zips to the
   release (or download them from the run's Artifacts). You can also start it by hand under Actions -> Build
