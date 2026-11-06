@@ -311,7 +311,9 @@ class App(tk.Tk):
         top.pack(fill="x")
         self.btn = ttk.Button(top, text="Start", command=self.toggle)
         self.btn.pack(side="left")
-        ttk.Label(top, foreground="#555", text="Pauses: random 0.5-5 s").pack(side="left", padx=(12, 2))
+        self.pause_btn = ttk.Button(top, text="Pause", command=self.toggle_pause, state="disabled")
+        self.pause_btn.pack(side="left", padx=(6, 0))
+        ttk.Label(top, foreground="#555", text="Pauses: configured polling interval").pack(side="left", padx=(12, 2))
         self.show_all = tk.BooleanVar(value=self.cfg["show_all"])
         ttk.Checkbutton(top, text="Show all listings", variable=self.show_all,
                         command=self._render).pack(side="left", padx=12)
@@ -826,6 +828,7 @@ class App(tk.Tk):
             self.poller.stop()
             self.poller = None
             self.btn.config(text="Start")
+            self.pause_btn.config(text="Pause", state="disabled")
             self.status.set("Stopped.")
             return
         if self._last_poller and self._last_poller.is_alive():
@@ -847,6 +850,22 @@ class App(tk.Tk):
                                   lambda s: self.q.put(("status", s)))
         self.poller.start()
         self.btn.config(text="Stop")
+        self.pause_btn.config(text="Pause", state="normal")
+
+    def toggle_pause(self):
+        """Pause after the current scan, or resume the existing poller."""
+        if not self.poller or not self.poller.is_alive():
+            return
+        if self.poller.is_paused:
+            self.poller.resume()
+            self.pause_btn.config(text="Pause")
+            self.status.set("Resumed.")
+            errorlog.action("Resumed polling")
+        else:
+            self.poller.pause()
+            self.pause_btn.config(text="Resume")
+            self.status.set("Pause requested - the current scan will finish first.")
+            errorlog.action("Requested polling pause")
 
     def _make_source(self):
         if self.cfg["source_mode"] == "api":
@@ -887,6 +906,7 @@ class App(tk.Tk):
                     self.status.set(payload)
                     if payload.startswith("PAUSED"):
                         self.btn.config(text="Start")
+                        self.pause_btn.config(text="Pause", state="disabled")
                         messagebox.showwarning("Polling paused", payload)
                 elif kind == "icon":
                     self._icons_dirty = True
