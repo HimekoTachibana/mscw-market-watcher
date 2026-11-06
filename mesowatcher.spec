@@ -15,9 +15,6 @@ NAME = f"{FULL} v{VERSION}"
 
 # Playwright's driver, plus the Chromium installed into it with PLAYWRIGHT_BROWSERS_PATH=0 (Linux, macOS builds)
 pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
-if sys.platform == "darwin":  # macOS: Chromium is copied into the .app afterwards (tools/add_browser_macos.py)
-    pw_datas = [d for d in pw_datas if ".local-browsers" not in d[0]]
-    pw_binaries = [b for b in pw_binaries if ".local-browsers" not in b[0]]
 
 # Linux: fallback copies of libraries Chromium needs, used only where the user's system lacks them (portable.py)
 _libs = Path(SPECPATH) / "build" / "browser-libs"
@@ -29,6 +26,14 @@ a = Analysis(
     datas=[("CHANGELOG.md", "."), ("mesowatcher/icon_ids.txt", "mesowatcher")] + pw_datas + extra_datas,
     hiddenimports=["PIL._tkinter_finder", "greenlet", "pyee", "pyee.asyncio"] + pw_hidden,
 )
+if sys.platform == "darwin":
+    # macOS: Chromium is copied into the finished .app afterwards (tools/add_browser_macos.py), because PyInstaller
+    # would try to re-sign the Chromium app nested inside it, which macOS refuses. PyInstaller's own Playwright hook
+    # collects it too, so it is taken out of the final lists here.
+    def _no_browser(toc):
+        return [e for e in toc if ".local-browsers" not in str(e[0]) and ".local-browsers" not in str(e[1])]
+    a.datas = _no_browser(a.datas)
+    a.binaries = _no_browser(a.binaries)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=NAME, console=False)
 coll = COLLECT(exe, a.binaries, a.datas, name=NAME)
