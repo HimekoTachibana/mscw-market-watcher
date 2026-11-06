@@ -19,6 +19,19 @@
   Closing all windows is treated as the browser being gone and it starts again.
 - **Pause / Resume** (added in v0.5.8) works with this: pressing Pause waits for the step being read and then holds
   all windows open; Resume carries on with the next window; Stop closes everything.
+- **Watch only (new option, off by default).** Settings > General > "Watch only": once every item has its window,
+  the windows are **left on their For sale now tab and nothing is clicked or reloaded**; the site refreshes the
+  list by itself every couple of minutes. The program only compares a small local fingerprint of each list (it
+  ignores the ticking "3m ago" texts) every N seconds (1-600, default 5). When a list changed - a shop appeared,
+  went away or changed its price - that window is read as usual. If a list did not change for a set time (default
+  10 minutes, 0 = never) the window is refreshed once with the usual single click, in case the page stalled.
+- **Item windows** button (main window): an overview of every watched item with its state, number of shops, when
+  it was last read and when its list last changed, updated every 2 seconds, so all windows can be monitored in one place.
+- The windows are kept fully alive while other windows are in front (the browser's background throttling is off),
+  and a window is never reloaded unless it has to be.
+- **Not possible:** putting several real browser windows inside one window of this program. Operating systems do
+  not allow that reliably, and tiny tiles would trigger the site's narrow layout without the item panel. Instead,
+  choose "a tab for each item" for one browser window, or use the Item windows overview.
 - Tests: one window per item, the single click refresh without a reload, the delay range limits, closed windows,
   removed items and Pause with the poller.
 

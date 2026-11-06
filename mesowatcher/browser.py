@@ -327,6 +327,31 @@ class _Session:
     page: object
     name: str
     used: str = ""
+    sig: str = ""  # fingerprint of the For sale now list the last time it was read
+    count: int = 0  # shops read the last time
+    last_read: float = 0.0
+    last_change: float = 0.0
+    state: str = "open"
+
+
+# A fingerprint of the For sale now list that ignores the "3m ago" texts, which tick on their own: it changes
+# when a shop appears, disappears or changes its price. null when the list is not showing.
+_SIGNATURE_JS = r"""
+() => {
+  const rows = [...document.querySelectorAll('li.fsn-row')];
+  const foot = document.querySelector('.fsn-foot');
+  if (!rows.length && !foot) return null;
+  const strip = t => t.replace(/\b\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|[smhd])\b\s*ago|just now/gi, '')
+                      .replace(/\s+/g, ' ');
+  let h = 5381, n = 0;
+  for (const r of rows) {
+    const t = strip(r.textContent || '');
+    for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0;
+    n++;
+  }
+  return n + ':' + h + ':' + (foot ? strip(foot.textContent || '').trim() : '');
+}
+"""
 
 
 class BrowserSource:
@@ -341,6 +366,13 @@ class BrowserSource:
 
     RETRY_NOT_FOUND_S = 300  # windows mode: an item that could not be opened is tried again after this long
 
+    @staticmethod
+    def _num(v, default: float) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     @property
     def windows_mode(self) -> bool:
         return (self.bc.get("scan_mode") or "windows") == "windows"
@@ -349,6 +381,8 @@ class BrowserSource:
         """Random pause before the next fetch: windows mode = the user's delay between items (1-600 s);
         otherwise 500-5000 ms between passes."""
         if self.windows_mode:
+            if self._watching:  # passive: a cheap local check of the windows, no clicks
+                return min(max(self._num(self.bc.get("watch_check_s"), 5.0), 1.0), 600.0)
             lo, hi = rotate_delay_range(self.cfg)
             return random.uniform(lo, hi)
         return random_pause_s(self.cfg)
@@ -367,6 +401,7 @@ class BrowserSource:
         self._sessions: dict = {}  # windows mode: item name (lower case) -> _Session
         self._retry_at: dict = {}
         self._turn = 0
+        self._watching = False  # passive mode is running: every item has its window and none is clicked
         self._spare = None  # the page the browser starts with, used for the first item
         self._selected, self._used = False, ""
         self._force_visible = False  # set once the window was opened because something went wrong
@@ -423,6 +458,10 @@ class BrowserSource:
         args, headless = [], False
         if self.windows_mode:
             self._force_visible = True  # the item windows are taken in turns, so they are real, visible windows
+        if self.windows_mode:
+            # the windows stay open for hours: keep them fully alive even when another window is in front
+            args = ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+                    "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
         if self.background:
             if self._can_show():
                 args = ["--window-position=-32000,-32000", "--window-size=1500,900",
@@ -949,12 +988,13 @@ class BrowserSource:
                         f"(the right-hand panel showed: {shown})")
         return self._scrape(page, name, used)
 
-    def _scrape(self, page, name: str, used: str) -> tuple[list[Listing], str]:
-        """The item is open in the right-hand panel: go to its For sale now list and read the shops."""
+    def _scrape(self, page, name: str, used: str, interactive: bool = True) -> tuple[list[Listing], str]:
+        """The item is open in the right-hand panel: go to its For sale now list and read the shops. With
+        interactive=False nothing is clicked unless the For sale now tab is not showing (passive mode)."""
         typical = self._typical(page, used)
         forsale = self._open_forsale(page)
         self.forsale_info = forsale
-        if not self._open_newest(page) and not forsale:
+        if interactive and not self._open_newest(page) and not forsale:
             return [], "could not open the Newest list"
         out = []
         for p in self._read_rows(page):
@@ -1052,6 +1092,9 @@ class BrowserSource:
             self.note = "waiting to try the items that could not be opened again"
             return []
         total = len(names)
+        self._watching = bool(self.bc.get("passive_updates")) and target is None and bool(live)
+        if self._watching:
+            return self._watch_step(live)
         try:
             if target is not None:
                 kind, name = "set up", target
@@ -1089,7 +1132,8 @@ class BrowserSource:
                                "on the page. Check the start URL and the filter text in Settings.")
         ls, note = self._monitor(page, name)
         if self._selected:
-            self._sessions[name.lower()] = _Session(page, name, self._used)
+            s = self._sessions[name.lower()] = _Session(page, name, self._used)
+            self._mark_read(s, len(ls))
         else:
             self._retry_at[name.lower()] = time.time() + self.RETRY_NOT_FOUND_S
             self._release_page(page)
@@ -1105,16 +1149,87 @@ class BrowserSource:
         if self._is_challenge(page):
             self._clear_challenge(page)
         if self._reclick(page, name):
-            return self._scrape(page, name, s.used)
+            ls, note = self._scrape(page, name, s.used)
+            self._mark_read(s, len(ls))
+            return ls, note
         self._act(f"'{name}' is no longer on the left; searching for it again in the same window")
         ls, note = self._monitor(page, name)
         if self._selected:
             s.used = self._used
+            self._mark_read(s, len(ls))
         else:
             del self._sessions[name.lower()]
             self._retry_at[name.lower()] = time.time() + self.RETRY_NOT_FOUND_S
             self._release_page(page)
         return ls, note
+
+    def _mark_read(self, s: "_Session", count: int):
+        s.count, s.last_read, s.last_change = count, time.time(), time.time()
+        s.state = "watching" if self.bc.get("passive_updates") else "open"
+        try:
+            s.sig = s.page.evaluate(_SIGNATURE_JS) or ""
+        except Exception:
+            s.sig = ""
+
+    def _watch_step(self, live: list[str]) -> list[Listing]:
+        """Passive mode: every item has its window, left on its For sale now tab. The site refreshes the list by
+        itself every couple of minutes; here only a local fingerprint of each list is compared (nothing is
+        clicked, no window is brought to the front). A list that changed is read as usual. A list that did not
+        change for `watch_stale_min` minutes is refreshed once with the usual click, in case the page stalled."""
+        stale_s = max(self._num(self.bc.get("watch_stale_min"), 10.0), 0.0) * 60.0
+        out: list[Listing] = []
+        changed, refreshed = [], []
+        for name in live:
+            s = self._sessions.get(name.lower())
+            if s is None:
+                continue
+            try:
+                if self._is_challenge(s.page):
+                    self._clear_challenge(s.page)
+                sig = s.page.evaluate(_SIGNATURE_JS)
+                now = time.time()
+                if stale_s and now - max(s.last_change, s.last_read) > stale_s:
+                    self._act(f"'{name}': no change for {stale_s / 60:g} min - refreshing it once with a click")
+                    ls, _note = self._refresh_session(name)
+                    out += ls
+                    refreshed.append(name)
+                elif sig is None or sig != s.sig:
+                    self._act(f"'{name}': the For sale now list changed - reading it")
+                    ls, _note = self._scrape(s.page, name, s.used, interactive=False)
+                    out += ls
+                    s.sig = s.page.evaluate(_SIGNATURE_JS) or ""
+                    s.count, s.last_read, s.last_change = len(ls), time.time(), time.time()
+                    changed.append(name)
+                s.state = "watching"
+            except (ChallengeDetected, RateLimited):
+                raise
+            except Exception as e:
+                self._act(f"'{name}' could not be checked ({_short(e)})")
+                s.state = "problem"
+        parts = []
+        if changed:
+            parts.append("new data: " + ", ".join(changed))
+        if refreshed:
+            parts.append("refreshed: " + ", ".join(refreshed))
+        self.note = f"Watching {len(live)} window(s) - " + ("; ".join(parts) if parts else "no change")
+        if parts:
+            self._act(f"Result of the watch pass: {len(out)} listing(s) - {'; '.join(parts)}")
+        return out
+
+    def session_status(self) -> list[dict]:
+        """One row per watched item for the 'Item windows' overview in the app."""
+        rows = []
+        now = time.time()
+        for n in self._watch_names():
+            s = self._sessions.get(n.lower())
+            if s is not None:
+                rows.append({"item": n, "state": s.state, "shops": s.count, "last_read": s.last_read,
+                             "last_change": s.last_change})
+            else:
+                retry = self._retry_at.get(n.lower(), 0)
+                rows.append({"item": n, "state": ("not found - trying again later" if retry > now else "waiting for its turn"),
+                             "shops": 0, "last_read": 0.0, "last_change": 0.0})
+        return rows
 
     def _reclick(self, page, name: str) -> bool:
         """Click the item in the result list on the left ONCE (the window never navigates away) and check that

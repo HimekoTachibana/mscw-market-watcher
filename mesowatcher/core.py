@@ -69,6 +69,9 @@ DEFAULT_CONFIG = {
         "row_selector": "li.buy-row",  # one listing in the Newest list (blank = find rows by their "each" label)
         "newest_label": "Newest",
         "scan_mode": "windows",  # "windows": one browser window per watched item, taken in turns; "single": one window, all items per pass
+        "passive_updates": False,  # windows mode: once all windows are set up, only read a page when its list changed (no clicking)
+        "watch_check_s": 5,  # passive: how often the windows are checked for a changed list (a local read, no clicks), 1..600
+        "watch_stale_min": 10,  # passive: a window whose list did not change for this long is refreshed once by a click (0 = never)
         "each_item_in_window": True,  # windows mode: a window per item (False = a tab per item)
         "forsale_label": "For sale now",  # tab (top of the right-hand panel) that lists every shop selling the item
         "max_results_tried": 6,  # search results clicked one after the other to find the item before giving up

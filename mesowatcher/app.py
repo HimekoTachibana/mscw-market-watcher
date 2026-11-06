@@ -313,6 +313,7 @@ class App(tk.Tk):
         self.btn.pack(side="left")
         self.pause_btn = ttk.Button(top, text="Pause", command=self.toggle_pause, state="disabled")
         self.pause_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Item windows", command=self.show_windows).pack(side="left", padx=(6, 0))
         self.delay_lbl = ttk.Label(top, foreground="#555")
         self.delay_lbl.pack(side="left", padx=(12, 2))
         self._delay_label()
@@ -855,11 +856,52 @@ class App(tk.Tk):
         self.pause_btn.config(text="Pause", state="normal")
 
     def _delay_label(self):
-        if self.cfg["browser"].get("scan_mode", "windows") == "windows":
+        bc = self.cfg["browser"]
+        if bc.get("scan_mode", "windows") == "windows" and bc.get("passive_updates"):
+            self.delay_lbl.config(text="Watching: pages left on For sale now, read only when the list changes")
+        elif bc.get("scan_mode", "windows") == "windows":
             lo, hi = core.rotate_delay_range(self.cfg)
             self.delay_lbl.config(text=f"Next item every {lo:g}-{hi:g} s")
         else:
             self.delay_lbl.config(text="Pauses: configured polling interval")
+
+    def show_windows(self):
+        """Overview of the watched items' browser windows (state, shops, last read, last change)."""
+        if getattr(self, "_win_view", None) is not None and self._win_view.winfo_exists():
+            self._win_view.lift()
+            return
+        w = self._win_view = tk.Toplevel(self)
+        w.title("Item windows")
+        w.geometry("760x380")
+        cols = ("item", "state", "shops", "read", "changed")
+        tv = ttk.Treeview(w, columns=cols, show="headings")
+        for c, t, wd in (("item", "Item", 300), ("state", "State", 130), ("shops", "Shops", 60),
+                         ("read", "Last read", 110), ("changed", "Last change", 110)):
+            tv.heading(c, text=t)
+            tv.column(c, width=wd, anchor="w")
+        tv.pack(fill="both", expand=True)
+        ttk.Label(w, foreground="#555", text="Each watched item keeps its own browser window. With 'Watch only' "
+                  "(Settings) the pages are left alone and read when the site updates the list.").pack(anchor="w", padx=6, pady=4)
+
+        def ago(t):
+            if not t:
+                return "-"
+            d = int(max(time.time() - t, 0))
+            return f"{d}s ago" if d < 120 else f"{d // 60} min ago"
+
+        def refresh():
+            if not w.winfo_exists():
+                return
+            rows = []
+            try:
+                rows = self.source.session_status() if hasattr(self.source, "session_status") else []
+            except Exception:
+                rows = []
+            tv.delete(*tv.get_children())
+            for r in rows:
+                tv.insert("", "end", values=(r["item"], r["state"], r["shops"], ago(r["last_read"]), ago(r["last_change"])))
+            w.after(2000, refresh)
+        refresh()
 
     def toggle_pause(self):
         """Pause after the current scan, or resume the existing poller."""
@@ -1062,6 +1104,14 @@ class App(tk.Tk):
                        self.cfg["rotate_delay_min_s"], width=10)
         g_rmax = field(f1, "Rotating windows: random delay between items - longest (seconds, up to 600)",
                        self.cfg["rotate_delay_max_s"], width=10)
+        passive = tk.BooleanVar(value=bc.get("passive_updates", False))
+        ttk.Checkbutton(f1, variable=passive, text="Watch only: leave every window on its For sale now tab and do nothing "
+                        "else; the site refreshes the list by itself, and a window is read only when its list changed "
+                        "(rotating windows)").pack(anchor="w")
+        g_wchk = field(f1, "Watch only: how often the windows are checked for a changed list (seconds, 1 to 600; "
+                           "a local check, nothing is clicked)", bc.get("watch_check_s", 5), width=10)
+        g_wstale = field(f1, "Watch only: refresh a window once by a click if its list did not change for (minutes, "
+                             "0 = never)", bc.get("watch_stale_min", 10), width=10)
         g_dmin = field(f1, "Random pause between actions - shortest (ms, minimum 500)", self.cfg["delay_min_ms"], width=10)
         g_dmax = field(f1, "Random pause between actions - longest (ms)", self.cfg["delay_max_ms"], width=10)
         ttk.Label(f1, foreground="#555", text="How far back to look is set in the main window (Watchlist > "
@@ -1125,6 +1175,9 @@ class App(tk.Tk):
                 if not (core.ROTATE_MIN_S <= rmin <= rmax <= core.ROTATE_MAX_S):
                     raise ValueError("Delay between items: shortest must be at least 1 s, longest at most 600 s, "
                                      "and the shortest cannot be longer than the longest")
+                wchk, wstale = float(g_wchk()), float(g_wstale())
+                if not (1 <= wchk <= 600) or wstale < 0:
+                    raise ValueError("Watch only: check every 1 to 600 s, and the refresh time cannot be negative")
                 keep_h = float(g_keep().strip() or 0)
                 if keep_h < 0:
                     raise ValueError("Delete listings older than: enter hours, 0 or more")
@@ -1137,7 +1190,8 @@ class App(tk.Tk):
             bc.update(extra)
             bc.update(start_url=g_start().strip(), channel=g_chan.get(), headless=not show_win.get(),
                       listing_cap=mx, max_results_tried=tries, scan_mode=mode_var.get(),
-                      each_item_in_window=each_win.get())
+                      each_item_in_window=each_win.get(), passive_updates=passive.get(),
+                      watch_check_s=wchk, watch_stale_min=wstale)
             self.cfg["rotate_delay_min_s"], self.cfg["rotate_delay_max_s"] = rmin, rmax
             self._delay_label()
             self.cfg["delay_min_ms"], self.cfg["delay_max_ms"] = dmin, dmax

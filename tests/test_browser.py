@@ -184,7 +184,9 @@ for (let k=0;k<DECOYS;k++) ITEMS.push({title:"Shoes Speed Scroll: Decoy "+k, ico
 if (MODE==='iconmismatch') ITEMS.push({title:WANT, icon:"02040001", panelIcon:"02040009"});  // right name, different icon
 ITEMS.push({title:WANT, icon:"02040000", panelIcon:null});
 let cur=null, tab='info', shown=0;
-const rowsFor = () => Array.from({length:TOTAL},(_,i)=>({s:"Fsn"+i, ch:1+i%9, fm:1+i%5, p:150000+i, min:(i+1)*2}));
+const EXTRA = [];
+window.__add = () => { EXTRA.push({s:"NewShop"+EXTRA.length, ch:3, fm:2, p:99000+EXTRA.length, min:0}); draw(); };  // the site's own auto-update
+const rowsFor = () => Array.from({length:TOTAL},(_,i)=>({s:"Fsn"+i, ch:1+i%9, fm:1+i%5, p:150000+i, min:(i+1)*2})).concat(EXTRA);
 function table(){
   document.getElementById('rows').innerHTML = ITEMS.map((it,i)=>
    `<tr><td><div class="item-cell"><div class="item-icon"><img src="data/icons/${it.icon}.png" alt=""></div>
@@ -819,3 +821,39 @@ def test_windows_mode_works_with_the_poller_and_pause(win):
     assert len(got) > n
     poller.stop()
     poller.join(15)
+
+
+@needs_screen
+def test_passive_mode_leaves_pages_alone_and_reads_only_changed_lists(win):
+    win.fetch(); win.fetch()  # both windows are set up and read
+    win.cfg["browser"].update(passive_updates=True, watch_check_s=2, watch_stale_min=0)
+    s1, s2 = win._sessions.values()
+    for s in (s1, s2):
+        s.page.evaluate("window.__clicks = 0; window.__keep = 1")
+    assert win.fetch() == [] and "no change" in win.note and win._watching
+    assert win.pause_s() == 2.0  # a cheap local check, not the item delay
+    assert s1.page.evaluate("window.__clicks") == 0 and s2.page.evaluate("window.__clicks") == 0
+    s2.page.evaluate("window.__add()")  # the site updated one list by itself
+    got = win.fetch()
+    assert {l.item_name for l in got} == {"Shoes Speed Scroll: Chaos"} and len(got) == 61
+    assert s2.page.evaluate("[window.__clicks, window.__keep]") == [0, 1]  # read without any click or reload
+    assert s1.page.evaluate("window.__clicks") == 0
+    assert win.fetch() == []  # nothing new since
+    rows = {r["item"]: r for r in win.session_status()}
+    assert rows["Shoes Speed Scroll: Chaos"]["shops"] == 61 and rows["Shoes Speed Scroll: Chaos"]["state"] == "watching"
+
+
+@needs_screen
+def test_passive_mode_refreshes_a_window_whose_list_never_changes(win):
+    win.fetch(); win.fetch()
+    win.cfg["browser"].update(passive_updates=True, watch_check_s=1, watch_stale_min=0.001)  # 0.06 s
+    s1, _ = win._sessions.values()
+    s1.page.evaluate("window.__clicks = 0")
+    time.sleep(0.2)
+    win.fetch()
+    assert s1.page.evaluate("window.__clicks") == 1 and "refreshed" in win.note
+
+
+def test_passive_mode_waits_until_every_item_has_its_window(win):
+    win.cfg["browser"].update(passive_updates=True)
+    assert win.session_status()[0]["state"] == "waiting for its turn"

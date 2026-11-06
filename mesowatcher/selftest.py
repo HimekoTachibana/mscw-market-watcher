@@ -69,6 +69,9 @@ def _exercise_feed(a, app, core):
     a._render()
     assert len(a.tree.get_children()) == 2, "'Place not seen' was not filtered out"
     assert "Next item every" in a.delay_lbl.cget("text"), "delay label of the rotating windows mode is missing"
+    a.show_windows()  # the overview of the item windows opens and refreshes without a browser
+    a.update()
+    a._win_view.destroy()
     a.cfg["feed_items"] = ["Red Potion"]  # the item filter
     a._render()
     assert [a.tree.set(r, "item") for r in a.tree.get_children()] == ["Red Potion"], "item filter did not apply"
