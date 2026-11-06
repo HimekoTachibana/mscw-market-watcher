@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.8 - 2026-11-05
+- Added a **Pause / Resume** button beside **Start**. Pause requests the poller to finish its current scan before waiting; Resume continues the existing polling session without restarting the browser. **Stop** remains available to end monitoring and close the browser.
+- Pause also takes effect during the idle interval between scans, and the wait can be resumed or stopped without waiting for the full interval.
+
 ## v0.5.7 - 2026-11-05
 Fixes found with the error log from v0.5.6.
 - **Closing the browser window is no longer logged as "check completed".** The log of v0.5.6 said the check was
