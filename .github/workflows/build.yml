@@ -179,7 +179,7 @@ jobs:
             prep: dnf install -y gtk3 mesa-libgbm alsa-lib xorg-x11-server-Xvfb tar gzip findutils
           - distro: openSUSE Tumbleweed
             image: opensuse/tumbleweed:latest
-            prep: zypper -n install libgtk-3-0 Mesa-libgbm1 libasound2 xorg-x11-server-Xvfb tar gzip findutils
+            prep: zypper -n install libgtk-3-0 libgbm1 libasound2 xorg-x11-server-Xvfb tar gzip findutils
           - distro: Arch Linux
             image: archlinux:latest
             prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
