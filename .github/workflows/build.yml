@@ -221,6 +221,16 @@ jobs:
             "$exe" --selftest --no-gui --browser  # no virtual screen in this image: the browser part only
           fi
 
+      - name: Diagnose the shipped Chromium (only when the self-test failed)
+        if: failure()
+        run: |
+          chrome=$(find app -type f -name chrome -path '*chrome-linux*' | head -1)
+          echo "Chromium: $chrome"
+          echo "--- libraries it cannot find on this system:"
+          ldd "$chrome" | grep "not found" || echo "(none)"
+          echo "--- starting it directly:"
+          "$chrome" --headless --no-sandbox --disable-gpu --dump-dom 'data:text/html,<p>ok</p>' 2>&1 | tail -40 || true
+
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     needs: [build, build-linux, linux-compat]

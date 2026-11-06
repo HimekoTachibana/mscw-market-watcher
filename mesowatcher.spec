@@ -34,6 +34,10 @@ if sys.platform == "darwin":
         return [e for e in toc if ".local-browsers" not in str(e[0]) and ".local-browsers" not in str(e[1])]
     a.datas = _no_browser(a.datas)
     a.binaries = _no_browser(a.binaries)
+if sys.platform.startswith("linux"):
+    # Every desktop has fontconfig and freetype, and an old copy cannot read a newer system's font configuration
+    # (it prints errors and may pick wrong fonts), so the system's own are used, as AppImages do.
+    a.binaries = [e for e in a.binaries if not re.match(r"lib(fontconfig|freetype)\.so", Path(str(e[0])).name)]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=NAME, console=False)
 coll = COLLECT(exe, a.binaries, a.datas, name=NAME)

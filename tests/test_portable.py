@@ -74,3 +74,15 @@ def test_linux_sound_player_order(monkeypatch):
 def test_default_browser_is_the_shipped_chromium_except_on_windows(tmp_path):
     cfg = core.Config(tmp_path / "c.json")
     assert cfg["browser"]["channel"] == ("msedge" if sys.platform == "win32" else "chromium")
+
+
+def test_children_get_the_system_library_path_back(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/app/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/user/lib")
+    portable.restore_system_library_path()
+    assert os.environ["LD_LIBRARY_PATH"] == "/opt/user/lib" and "LD_LIBRARY_PATH_ORIG" not in os.environ
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/app/_internal")
+    portable.restore_system_library_path()  # nothing set before the launcher: removed entirely
+    assert "LD_LIBRARY_PATH" not in os.environ

@@ -56,8 +56,24 @@ def local_browsers_dir() -> Optional[Path]:
     return d if d.is_dir() and any(d.glob("chromium-*")) else None
 
 
+def restore_system_library_path():
+    """PyInstaller's launcher points LD_LIBRARY_PATH at the program's own libraries (built on an old Debian) so the
+    frozen Python finds them. Child processes inherit that: Chromium, Playwright's driver and the sound player would
+    then load those old copies (GLib, fontconfig, ...) instead of the system's and can crash on a newer system.
+    The program itself has already loaded what it needs, so the system's own path is put back for everything it
+    starts; Chromium then gets only the fallback libraries it is missing (browser_env)."""
+    if not (frozen() and sys.platform.startswith("linux")):
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)  # what the user had before the launcher changed it
+    if orig:
+        os.environ["LD_LIBRARY_PATH"] = orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+
 def setup():
-    """Called once at start-up, before Playwright is used."""
+    """Called once at start-up, before Playwright or any other program is started."""
+    restore_system_library_path()
     if frozen() and local_browsers_dir() is not None:
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")  # Playwright does this too; harmless to be sure
 
