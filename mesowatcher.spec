@@ -13,14 +13,31 @@ VERSION = re.search(r'^VERSION = "([^"]+)"', _src, re.M).group(1)
 FULL = re.search(r'^FULL_NAME = "([^"]+)"', _src, re.M).group(1)
 NAME = f"{FULL} v{VERSION}"
 
-pw_datas, pw_binaries, pw_hidden = collect_all("playwright")  # Playwright's bundled driver
+# Playwright's driver, plus the Chromium installed into it with PLAYWRIGHT_BROWSERS_PATH=0 (Linux, macOS builds)
+pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
+
+# Linux: fallback copies of libraries Chromium needs, used only where the user's system lacks them (portable.py)
+_libs = Path(SPECPATH) / "build" / "browser-libs"
+extra_datas = [(str(_libs), "browser-libs")] if sys.platform.startswith("linux") and _libs.is_dir() else []
 
 a = Analysis(
     ["run.py"],
     binaries=pw_binaries,
-    datas=[("CHANGELOG.md", "."), ("mesowatcher/icon_ids.txt", "mesowatcher")] + pw_datas,
+    datas=[("CHANGELOG.md", "."), ("mesowatcher/icon_ids.txt", "mesowatcher")] + pw_datas + extra_datas,
     hiddenimports=["PIL._tkinter_finder", "greenlet", "pyee", "pyee.asyncio"] + pw_hidden,
 )
+if sys.platform == "darwin":
+    # macOS: Chromium is copied into the finished .app afterwards (tools/add_browser_macos.py), because PyInstaller
+    # would try to re-sign the Chromium app nested inside it, which macOS refuses. PyInstaller's own Playwright hook
+    # collects it too, so it is taken out of the final lists here.
+    def _no_browser(toc):
+        return [e for e in toc if ".local-browsers" not in str(e[0]) and ".local-browsers" not in str(e[1])]
+    a.datas = _no_browser(a.datas)
+    a.binaries = _no_browser(a.binaries)
+if sys.platform.startswith("linux"):
+    # Every desktop has fontconfig and freetype, and an old copy cannot read a newer system's font configuration
+    # (it prints errors and may pick wrong fonts), so the system's own are used, as AppImages do.
+    a.binaries = [e for e in a.binaries if not re.match(r"lib(fontconfig|freetype)\.so", Path(str(e[0])).name)]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=NAME, console=False)
 coll = COLLECT(exe, a.binaries, a.datas, name=NAME)

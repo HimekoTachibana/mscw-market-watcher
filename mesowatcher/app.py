@@ -857,13 +857,16 @@ class App(tk.Tk):
 
     def _delay_label(self):
         bc = self.cfg["browser"]
-        if bc.get("scan_mode", "windows") == "windows" and bc.get("passive_updates"):
+        revisit = core.item_revisit_s(self.cfg)
+        if bc.get("scan_mode", "single") == "windows" and bc.get("passive_updates"):
             self.delay_lbl.config(text="Watching: pages left on For sale now, read only when the list changes")
-        elif bc.get("scan_mode", "windows") == "windows":
+        elif bc.get("scan_mode", "single") == "windows":
             lo, hi = core.rotate_delay_range(self.cfg)
-            self.delay_lbl.config(text=f"Next item every {lo:g}-{hi:g} s")
+            self.delay_lbl.config(text=f"Next item every {lo:g}-{hi:g} s (each item at most every {revisit:g} s)")
         else:
-            self.delay_lbl.config(text="Pauses: configured polling interval")
+            lo = max(float(self.cfg["pass_delay_min_s"]), core.PASS_DELAY_FLOOR_S)
+            hi = max(float(self.cfg["pass_delay_max_s"]), lo)
+            self.delay_lbl.config(text=f"One pass over the watchlist, then a pause of {lo:g}-{hi:g} s")
 
     def show_windows(self):
         """Overview of the watched items' browser windows (state, shops, last read, last change)."""
@@ -1088,19 +1091,26 @@ class App(tk.Tk):
         ttk.Combobox(f1, textvariable=g_chan, values=("msedge", "chrome", "chromium"), width=14,
                      state="readonly").pack(anchor="w")
         show_win = tk.BooleanVar(value=not bc["headless"])
-        ttk.Checkbutton(f1, text="Show the browser window while working (off = runs in the background; it opens by itself "
-                             "when something goes wrong or a check needs you)",
+        ttk.Checkbutton(f1, text="Show the browser window while working (off = a headless browser with no window; a "
+                             "window opens by itself when a check or a refused request needs you)",
                         variable=show_win).pack(anchor="w", pady=(8, 0))
         ttk.Label(f1, text="How the watched items are scanned").pack(anchor="w", pady=(8, 0))
-        mode_var = tk.StringVar(value=bc.get("scan_mode", "windows"))
+        mode_var = tk.StringVar(value=bc.get("scan_mode", "single"))
+        ttk.Radiobutton(f1, variable=mode_var, value="single", text="One page: all items are searched one after "
+                        "the other in a single pass, then a pause (recommended: lightest on the site)").pack(anchor="w")
         ttk.Radiobutton(f1, variable=mode_var, value="windows", text="Rotating windows: every watched item keeps its own "
-                        "browser window open and the windows are taken in turns (recommended)").pack(anchor="w")
-        ttk.Radiobutton(f1, variable=mode_var, value="single", text="One window: all items are searched one after "
-                        "the other in a single pass").pack(anchor="w")
+                        "page open and the pages are taken in turns (every open page also refreshes itself, so this "
+                        "loads the site more)").pack(anchor="w")
+        g_pmin = field(f1, "One page: random pause between passes - shortest (seconds, minimum 60)",
+                       self.cfg["pass_delay_min_s"], width=10)
+        g_pmax = field(f1, "One page: random pause between passes - longest (seconds)",
+                       self.cfg["pass_delay_max_s"], width=10)
+        g_revisit = field(f1, "Read each watched item at most once every (seconds, minimum 60; both modes)",
+                          self.cfg["item_revisit_min_s"], width=10)
         each_win = tk.BooleanVar(value=bc.get("each_item_in_window", True))
         ttk.Checkbutton(f1, variable=each_win, text="Rotating windows: open each item in a separate window "
                         "(off = a tab for each item)").pack(anchor="w")
-        g_rmin = field(f1, "Rotating windows: random delay between items - shortest (seconds, 1 to 600)",
+        g_rmin = field(f1, "Rotating windows: random delay between items - shortest (seconds, 10 to 600)",
                        self.cfg["rotate_delay_min_s"], width=10)
         g_rmax = field(f1, "Rotating windows: random delay between items - longest (seconds, up to 600)",
                        self.cfg["rotate_delay_max_s"], width=10)
@@ -1173,8 +1183,14 @@ class App(tk.Tk):
                 tries = max(int(g_tries()), 1)
                 rmin, rmax = float(g_rmin()), float(g_rmax())
                 if not (core.ROTATE_MIN_S <= rmin <= rmax <= core.ROTATE_MAX_S):
-                    raise ValueError("Delay between items: shortest must be at least 1 s, longest at most 600 s, "
-                                     "and the shortest cannot be longer than the longest")
+                    raise ValueError(f"Delay between items: shortest must be at least {core.ROTATE_MIN_S:g} s, longest "
+                                     "at most 600 s, and the shortest cannot be longer than the longest")
+                pmin, pmax, revisit = float(g_pmin()), float(g_pmax()), float(g_revisit())
+                if not (core.PASS_DELAY_FLOOR_S <= pmin <= pmax):
+                    raise ValueError(f"Pause between passes: shortest must be at least {core.PASS_DELAY_FLOOR_S:g} s "
+                                     "and cannot be longer than the longest")
+                if revisit < core.ITEM_REVISIT_FLOOR_S:
+                    raise ValueError(f"Read each item at most once every: at least {core.ITEM_REVISIT_FLOOR_S:g} s")
                 wchk, wstale = float(g_wchk()), float(g_wstale())
                 if not (1 <= wchk <= 600) or wstale < 0:
                     raise ValueError("Watch only: check every 1 to 600 s, and the refresh time cannot be negative")
@@ -1193,6 +1209,8 @@ class App(tk.Tk):
                       each_item_in_window=each_win.get(), passive_updates=passive.get(),
                       watch_check_s=wchk, watch_stale_min=wstale)
             self.cfg["rotate_delay_min_s"], self.cfg["rotate_delay_max_s"] = rmin, rmax
+            self.cfg["pass_delay_min_s"], self.cfg["pass_delay_max_s"] = pmin, pmax
+            self.cfg["item_revisit_min_s"] = revisit
             self._delay_label()
             self.cfg["delay_min_ms"], self.cfg["delay_max_ms"] = dmin, dmax
             self.cfg["osms_base"] = g_osms().strip()

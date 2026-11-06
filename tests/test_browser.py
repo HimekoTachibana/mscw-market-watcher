@@ -231,6 +231,15 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/api/limited"):  # what a rate-limited background request looks like
+            body = b'{"error":"rate limited"}'
+            self.send_response(429)
+            self.send_header("Retry-After", "42")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/pass403"):  # like Cloudflare: the check page is answered with 403, then the site loads
             body = (b"<!doctype html><title>Just a moment...</title><p>Checking</p>"
                     b"<script>setTimeout(()=>{location.href='/fsn'},1500)</script>")
@@ -668,15 +677,34 @@ def _private_data_dir(tmp_path, monkeypatch):
     errorlog.clear()
 
 
+@pytest.fixture()
+def no_floors(monkeypatch):
+    """Lets tests step through items without the production waits (60 s per item, 10 s between items)."""
+    monkeypatch.setattr(core, "ITEM_REVISIT_FLOOR_S", 0.0)
+    monkeypatch.setattr(core, "ROTATE_MIN_S", 1.0)
+
+
 needs_screen = pytest.mark.skipif(not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"),
                                   reason="needs a screen (run under xvfb-run)")
 
 
-@needs_screen
-def test_background_runs_in_an_off_screen_window_and_scrapes(fsn):
+def test_background_runs_in_a_real_headless_browser_and_scrapes(fsn):
     assert len(fsn.fetch()) == 60
-    assert fsn.mode == "background (off-screen window)"
-    assert fsn._page.evaluate("[window.screenX, window.screenY]")[0] < -1000  # far off-screen
+    assert fsn.mode == "background (headless)" and fsn.background
+
+
+def test_windows_mode_reads_each_item_at_most_once_per_revisit_time(src, site):
+    """Headless works for the rotating mode too, and an item read a moment ago is not read again."""
+    src.close()
+    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", scan_mode="windows")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Decoy 0", "max_price": None},
+                            {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert len(src.fetch()) == 60 and len(src.fetch()) == 60  # both set up
+    for s in src._sessions.values():
+        s.page.evaluate("window.__clicks = 0")
+    assert src.fetch() == [] and "every item was read in the last" in src.note
+    assert all(s.page.evaluate("window.__clicks") == 0 for s in src._sessions.values())
+    assert 170 <= src.pause_s() <= 180 + 40  # waits until the first item is due again (default 180 s)
 
 
 @needs_screen
@@ -736,27 +764,95 @@ def test_closing_the_window_is_not_a_completed_check(src):
 
 
 # ---- windows mode: one browser window per watched item, taken in turns
-@pytest.fixture()
-def win(src, site):
-    """The same browser, in windows mode (needs a screen: the item windows are real windows)."""
+@pytest.fixture(params=["window", "headless"])
+def win(request, src, site, no_floors):
+    """The same browser, in windows mode: once with real windows (needs a screen), once headless (each item's
+    "window" is then a page of the headless browser)."""
+    headless = request.param == "headless"
+    if not headless and (not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("needs a screen (run under xvfb-run)")
     src.close()
-    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", headless=False, scan_mode="windows")
+    src.cfg["item_revisit_min_s"] = 0
+    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", headless=headless, scan_mode="windows")
     src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Decoy 0", "max_price": None},
                             {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
     return src
 
 
-def test_delay_between_items_is_the_users_range_clamped_to_1_600(src):
+def test_delay_between_items_is_the_users_range_clamped_to_10_600(src):
     src.cfg["browser"]["scan_mode"] = "windows"
-    for lo, hi, want in ((3, 9, (3, 9)), (0, 5000, (1, 600)), (50, 10, (50, 50)), ("x", None, (5, 20))):
+    for lo, hi, want in ((13, 19, (13, 19)), (0, 5000, (10, 600)), (50, 10, (50, 50)), ("x", None, (20, 40))):
         src.cfg["rotate_delay_min_s"], src.cfg["rotate_delay_max_s"] = lo, hi
         assert core.rotate_delay_range(src.cfg) == (float(want[0]), float(want[1]))
         assert all(want[0] <= src.pause_s() <= want[1] for _ in range(20))
+
+
+def test_one_page_mode_pauses_minutes_between_passes(src):
     src.cfg["browser"]["scan_mode"] = "single"
-    assert src.pause_s() <= 5.0  # the old behaviour: 0.5-5 s between passes
+    assert all(180 <= src.pause_s() <= 300 for _ in range(20))  # default 3-5 minutes
+    src.cfg["pass_delay_min_s"], src.cfg["pass_delay_max_s"] = 1, 2
+    src.cfg["item_revisit_min_s"] = 0
+    assert all(src.pause_s() >= 60 for _ in range(20))  # never below the floors, whatever the settings
 
 
-@needs_screen
+def test_rate_limited_background_request_stops_the_scan(fsn, site):
+    """A 429 to a request the page makes by itself (not a page load) must still stop the scan, with Retry-After."""
+    fsn.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    fsn.fetch()  # page loaded, item read
+    fsn._page.evaluate(f"fetch('{site}/api/limited').catch(() => null)")
+    fsn._page.wait_for_timeout(300)
+    with pytest.raises(core.RateLimited) as e:
+        fsn.fetch()
+    assert e.value.retry_after == pytest.approx(42, abs=2)  # minus the moment since the answer came
+    assert "asked us to slow down (HTTP 429 for /api/limited)" in "\n".join(errorlog.trail())
+
+
+def test_rate_limits_from_other_sites_are_ignored(src):
+    class Resp:
+        status, url, headers = 429, "https://example.org/x", {"retry-after": "5"}
+    src._on_response(Resp())
+    src._check_limited()  # nothing raised
+    Resp.url = src.bc["start_url"] + "api/x"
+    src._on_response(Resp())
+    with pytest.raises(core.RateLimited) as e:
+        src._check_limited()
+    assert e.value.retry_after == pytest.approx(5, abs=1)
+
+
+def test_cloudflare_check_page_is_not_counted_as_a_rate_limit(src):
+    class Resp:
+        status, headers = 503, {"cf-mitigated": "challenge"}
+    Resp.url = src.bc["start_url"]
+    src._on_response(Resp())
+    src._check_limited()  # left to the challenge handling
+
+
+def test_completed_check_starts_a_cooldown(src):
+    class Page:
+        def __init__(self):
+            self.n = 0
+
+        def is_closed(self):
+            return False
+
+        def title(self):
+            self.n += 1
+            return "Just a moment..." if self.n == 1 else "Meso Watch"
+    src.cfg["browser"].update(headless=False, challenge_wait_s=5)
+    src.cfg["browser"]["scan_mode"] = "single"
+    assert src._clear_challenge(Page()) is True
+    assert src.pause_s() >= 890  # default 15 minutes before the next read
+
+
+def test_ordinary_error_does_not_restart_the_browser(fsn, monkeypatch):
+    page = fsn._page
+    monkeypatch.setattr(fsn, "_monitor", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        fsn.fetch()
+    assert fsn._page is page and not page.is_closed()  # same browser, nothing reloaded
+    assert "Opening the browser window for you" not in "\n".join(errorlog.trail())
+
+
 def test_windows_mode_sets_items_up_one_window_each_then_refreshes_by_one_click(win):
     a = win.fetch()  # step 1: window for the first item, searched, verified, For sale now tab, read
     assert len(a) == 60 and {l.item_name for l in a} == {"Shoes Speed Scroll: Decoy 0"}
@@ -777,7 +873,6 @@ def test_windows_mode_sets_items_up_one_window_each_then_refreshes_by_one_click(
     assert [p.url for p in (s1.page, s2.page)] == [win.bc["start_url"]] * 2
 
 
-@needs_screen
 def test_windows_mode_item_that_cannot_be_found_does_not_block_the_others(win):
     win.cfg["watchlist"] = [{"name": "No Such Item", "max_price": None}, {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
     first = win.fetch()
@@ -786,7 +881,6 @@ def test_windows_mode_item_that_cannot_be_found_does_not_block_the_others(win):
     assert list(win._sessions) == ["shoes speed scroll: chaos"]
 
 
-@needs_screen
 def test_windows_mode_closed_window_is_opened_again_and_removed_items_lose_their_window(win):
     win.fetch(); win.fetch()
     first = next(iter(win._sessions.values())).page
@@ -799,7 +893,6 @@ def test_windows_mode_closed_window_is_opened_again_and_removed_items_lose_their
     assert len([p for p in win._ctx.pages if not p.is_closed()]) == 1
 
 
-@needs_screen
 def test_windows_mode_works_with_the_poller_and_pause(win):
     got, status = [], []
     win.cfg["rotate_delay_min_s"] = win.cfg["rotate_delay_max_s"] = 1
@@ -823,7 +916,6 @@ def test_windows_mode_works_with_the_poller_and_pause(win):
     poller.join(15)
 
 
-@needs_screen
 def test_passive_mode_leaves_pages_alone_and_reads_only_changed_lists(win):
     win.fetch(); win.fetch()  # both windows are set up and read
     win.cfg["browser"].update(passive_updates=True, watch_check_s=2, watch_stale_min=0)
@@ -843,7 +935,6 @@ def test_passive_mode_leaves_pages_alone_and_reads_only_changed_lists(win):
     assert rows["Shoes Speed Scroll: Chaos"]["shops"] == 61 and rows["Shoes Speed Scroll: Chaos"]["state"] == "watching"
 
 
-@needs_screen
 def test_passive_mode_refreshes_a_window_whose_list_never_changes(win):
     win.fetch(); win.fetch()
     win.cfg["browser"].update(passive_updates=True, watch_check_s=1, watch_stale_min=0.001)  # 0.06 s
@@ -857,3 +948,52 @@ def test_passive_mode_refreshes_a_window_whose_list_never_changes(win):
 def test_passive_mode_waits_until_every_item_has_its_window(win):
     win.cfg["browser"].update(passive_updates=True)
     assert win.session_status()[0]["state"] == "waiting for its turn"
+
+
+def test_an_old_rate_limit_answer_only_counts_for_the_rest_of_its_wait(src, monkeypatch):
+    class Resp:
+        status, headers = 429, {"retry-after": "60"}
+    Resp.url = src.bc["start_url"] + "api/x"
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    src._on_response(Resp())
+    clock[0] += 45  # a page's own refresh got the 429; our next action comes 45 s later
+    with pytest.raises(core.RateLimited) as e:
+        src._check_limited()
+    assert e.value.retry_after == pytest.approx(15)
+    src._on_response(Resp())
+    clock[0] += 90  # the wait the site asked for is already over
+    src._check_limited()  # nothing raised
+
+
+def test_a_step_with_nothing_due_does_not_count_as_contacting_the_site(src, site):
+    src.close()
+    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", scan_mode="windows")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert len(src.fetch()) == 60 and src.touched_site  # set up: the site was used
+    assert src.fetch() == [] and not src.touched_site  # read a moment ago: nothing was sent
+
+
+@needs_screen
+def test_headless_check_opens_a_window_and_the_scan_goes_on_after_it_was_completed(fsn, site):
+    """Headless -> a Cloudflare check appears -> the window opens by itself -> the check is completed there (here
+    the mock page moves on by itself) -> the items are read, and the next read waits for the cool-down. The rest
+    of the session stays in the window (the clearance belongs to that browser)."""
+    fsn.close()
+    fsn.cfg["browser"].update(start_url=site + "/pass403", headless=True, challenge_wait_s=15)
+    assert fsn.background
+    assert len(fsn.fetch()) == 60
+    trail = "\n".join(errorlog.trail())
+    assert "Opening the browser window for you" in trail and "The Cloudflare check was completed" in trail
+    assert fsn.mode == "window" and not fsn.background
+    assert fsn.pause_s() >= 890
+
+
+def test_each_running_program_gets_its_own_library_folder(tmp_path):
+    from mesowatcher import portable
+    base = tmp_path / "active"
+    (base / "999999999").mkdir(parents=True)  # left by a program that is no longer running
+    (base / "1").mkdir()  # pid 1 is always running: not ours, kept
+    mine = portable.libs_work_dir(base)
+    assert mine.name == str(os.getpid())
+    assert not (base / "999999999").exists() and (base / "1").exists()

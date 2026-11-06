@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.6.0 - 2026-11-06
+Lighter on meso.watch: fewer requests, and the program now notices when the site asks it to slow down.
+- **Rate limits are seen on every request.** Until now a 429/503 was only noticed when a whole page was loaded.
+  The requests the site's page makes by itself after a click or a scroll were not checked, so the program kept
+  clicking while the site was already saying "slow down". Now every response from the site is watched; a 429 or
+  503 stops the step at once and the program waits for the site's Retry-After (seconds or a date), then backs off
+  from 1 minute, doubling up to 1 hour, with a little randomness. Answers from other sites are ignored, and
+  Cloudflare check pages are still handled as checks.
+- **Headless by default.** Background work now runs in a real headless browser (no window, not an off-screen
+  window), also in the rotating mode. A window still opens by itself when a Cloudflare check or a refused
+  request needs you. The browser's normal background throttling is no longer switched off.
+- **One page is the default scan.** All watched items are read in one pass on one page, then the program waits
+  **3-5 minutes** (Settings, never under 60 s) instead of 0.5-5 s. Rotating windows is still available, but every
+  page it keeps open refreshes itself, so it is no longer recommended. Its delay between items is now 20-40 s by
+  default and never under 10 s.
+- **Each item at most once every 3 minutes** (Settings, never under 60 s), in both modes. In the rotating mode an
+  item that was read recently is skipped until it is due; Watch only's click refresh obeys it too.
+- **15-minute cool-down after a Cloudflare check** before the next read (config `challenge_cooldown_s`).
+- **Errors no longer restart the browser.** An ordinary error is logged and retried after the backoff (from
+  1 minute instead of 10 s); the browser is not closed, reopened and pointed at the site again. A window is still
+  opened for checks, refused requests and a failed Settings test.
+- The page is reloaded at most every 2 hours (was every 10 passes).
+- **Your saved settings are kept.** The new defaults (one page, headless, 3-5 min between passes) apply to fresh
+  installs; an existing install keeps its scan mode and its "Show the browser window" choice. The hard floors
+  (each item at most once a minute, at least 10 s between items, 60 s between passes) and the rate-limit handling
+  apply to everyone. The rotating mode now honors "Show the browser window" too: it runs headless unless that is
+  ticked. **Watch only** still needs the rotating mode (Settings > Scan mode > Rotating windows).
+- A `Retry-After` is capped at 1 hour (the status line says when the site asked for more), an old 429 counts only
+  for the rest of its wait, and a step that did not contact the site no longer ends a backoff.
+- After a Cloudflare check is completed in the window that opened for it, the rest of that session stays in the
+  window (Cloudflare's clearance belongs to that browser); the next Start runs headless again.
+- **Portable downloads, nothing to install.** The Linux and macOS downloads now carry their own Chromium (no
+  `playwright install`, no Chrome needed); Windows keeps using the Edge that comes with Windows.
+- **One Linux download for every distribution.** It is now built on Debian 11 (glibc 2.31) instead of the newest
+  Ubuntu, so it starts on Ubuntu 20.04+, Debian 11+, Fedora, RHEL 9, openSUSE, Arch, CachyOS, Bazzite and SteamOS.
+  The release build starts the finished download on Ubuntu 22.04, Debian 12, Fedora, openSUSE Tumbleweed and Arch
+  before publishing (a failure there blocks the release), and on CachyOS, SteamOS (Holo) and Bazzite as
+  informational checks that never block it.
+- If a minimal Linux install lacks a library Chromium needs (NSS and the SQLite it uses, CUPS, ATK, AT-SPI,
+  xkbcommon, a few X extensions), the program uses its own copy of **only that library**, for the browser only,
+  from a folder of its own for each running copy of the program. Libraries tied to the
+  graphics driver or sound system are never replaced.
+- Where the system blocks Chromium's sandbox (Ubuntu 24.04+'s AppArmor rule), the browser is started once more
+  without it instead of failing.
+- Sound on Linux also works with PipeWire's `pw-play` (Fedora, Bazzite, SteamOS, CachyOS) and `ffplay`.
+- No distribution-specific instructions (`apt install ...`) remain in the build script or README.
+  `build_linux.sh` and `build_macos.sh` are now marked executable in git.
+- Tests: rate limit seen on a background request (with Retry-After), other sites' 429s ignored, Cloudflare check
+  pages not counted as rate limits, the cool-down, the per-item floor, the pause between passes, no browser restart
+  after an error, headless mode, saved settings kept, the Retry-After cap, old 429s, steps that did not contact
+  the site, headless -> check -> window -> completed -> scan goes on, and every rotating-mode test both with real
+  windows and headless.
+
 ## v0.5.9 - 2026-11-05
 - **Rotating windows (new default way of scanning).** Every watched item now gets its own real browser window
   (no headless browser). The program opens a window for an item, searches it, checks the right item is

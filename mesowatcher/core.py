@@ -1,7 +1,9 @@
 """MesoWatcher core: config, listing sources, item database, matching, sound.
 
 Design rules for the network code:
-  * Polite: minimum poll interval, backs off on 429/503 (honoring Retry-After).
+  * Polite: minimum poll interval, backs off on 429/503 (honoring Retry-After), including 429/503 answers to
+    the requests the site's page makes in the background after a click or scroll (see browser.py).
+  * Each watched item is read at most once every few minutes (ITEM_REVISIT_FLOOR_S), whatever the settings.
   * If the site serves a Cloudflare challenge or a 403, polling PAUSES and the UI says so.
     It never tries to solve, spoof or route around the challenge.
   * Listings are read by a real browser (browser.py) that clicks through the site like a person.
@@ -32,10 +34,16 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.9"
+VERSION = "0.6.0"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
-MAX_BACKOFF_S = 600
+MAX_BACKOFF_S = 3600  # longest wait after repeated rate limits / errors
+ERROR_BACKOFF_MIN_S = 60.0  # first wait after an error (doubles each time, up to MAX_BACKOFF_S)
+RATE_LIMIT_DEFAULT_S = 120.0  # wait after a 429/503 that gave no usable Retry-After
+ITEM_REVISIT_FLOOR_S = 60.0  # no watched item is read more often than this, whatever the settings
+PASS_DELAY_FLOOR_S = 60.0  # one-window mode: shortest pause between two passes
+CONFIG_VERSION = 2  # recorded in saved settings. Saved choices are never changed on load: new defaults apply to
+# fresh installs, and the hard floors above (and the rate-limit handling) apply to everyone.
 
 
 def data_dir() -> Path:
@@ -51,14 +59,19 @@ def data_dir() -> Path:
 
 
 DEFAULT_CONFIG = {
-    "interval_ms": 30000,  # api mode only. Browser mode pauses a random delay_min_ms..delay_max_ms instead
-    "delay_min_ms": 500,  # random pause between actions and between passes (never below 500)
+    "config_version": CONFIG_VERSION,
+    "interval_ms": 30000,  # api mode only. Browser mode uses the pauses below instead
+    "delay_min_ms": 500,  # random pause between actions inside one item (never below 500)
     "delay_max_ms": 5000,
+    "pass_delay_min_s": 180,  # one-window mode: random pause between two passes (never below 60 s)
+    "pass_delay_max_s": 300,
+    "item_revisit_min_s": 180,  # each watched item is read at most once in this many seconds (never below 60)
+    "challenge_cooldown_s": 900,  # after a Cloudflare check was completed, wait this long before the next read
     "source_mode": "browser",  # "browser" (click through the site) or "api" (JSON endpoint)
     "browser": {
         "start_url": "https://meso.watch/",
-        "channel": {"win32": "msedge", "darwin": "chrome"}.get(sys.platform, "chromium"),
-        "headless": True,  # False = show the browser window (needed to pass a Cloudflare check yourself)
+        "channel": "msedge" if sys.platform == "win32" else "chromium",  # Linux/macOS: the Chromium shipped with the program
+        "headless": True,  # True = a real headless browser (no window); False = show the browser window
         "lookback_min": 180,  # scroll the Newest list down to listings from the last N minutes (3 hours)
         "listing_cap": 200,  # safety cap on listings read per item
         "max_scrolls": 40,
@@ -68,7 +81,7 @@ DEFAULT_CONFIG = {
         "item_selector": "button.item-select",  # item buttons in the table (blank = match by visible text)
         "row_selector": "li.buy-row",  # one listing in the Newest list (blank = find rows by their "each" label)
         "newest_label": "Newest",
-        "scan_mode": "windows",  # "windows": one browser window per watched item, taken in turns; "single": one window, all items per pass
+        "scan_mode": "single",  # "single": one page, all items per pass (lightest); "windows": one page per watched item, taken in turns
         "passive_updates": False,  # windows mode: once all windows are set up, only read a page when its list changed (no clicking)
         "watch_check_s": 5,  # passive: how often the windows are checked for a changed list (a local read, no clicks), 1..600
         "watch_stale_min": 10,  # passive: a window whose list did not change for this long is refreshed once by a click (0 = never)
@@ -80,8 +93,8 @@ DEFAULT_CONFIG = {
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it
     "feed_max_age_hours": 0,  # delete Live Feed listings older than this many hours (0 = use the look-back window)
     "feed_dismissed": {},  # {listing key: time.time()} of listings removed with "Clear Live Feed"; they stay gone
-    "rotate_delay_min_s": 5,   # windows mode: random delay between two items, 1..600 seconds
-    "rotate_delay_max_s": 20,
+    "rotate_delay_min_s": 20,   # windows mode: random delay between two items, 10..600 seconds
+    "rotate_delay_max_s": 40,
     "test_item": "Gloves Crit. Rate Scroll: Intermediate",  # Settings > Test uses this item
     "feed_items": [],  # Live Feed: only these items are shown (empty = every item)
     "only_with_location": False,  # Live Feed: show only listings that have BOTH a channel and a location
@@ -132,8 +145,9 @@ class Config:
                         self.data[k].update(v)
                     else:
                         self.data[k] = v
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError):
                 pass
+
 
     def save(self):
         self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
@@ -287,6 +301,7 @@ class Poller(threading.Thread):
         self._halt = threading.Event()  # not "_stop": Thread uses that name internally
         self._pause = threading.Event()
         self._backoff = 0.0
+        self._errors = 0
         if hasattr(source, "on_status"):
             source.on_status = on_status  # lets a browser source say "waiting for you..."
         if hasattr(source, "should_stop"):
@@ -326,25 +341,37 @@ class Poller(threading.Thread):
             if self._halt.is_set():
                 break
             pause = getattr(self.source, "pause_s", None)
-            wait = pause() if pause else max(self.cfg["interval_ms"], floor) / 1000.0
             try:
                 listings = self.source.fetch()
-                self._backoff = 0.0
+                # a step that did not contact the site (nothing due yet, only a local check) proves nothing about
+                # the site, so it does not end a backoff that repeated 429s built up
+                if getattr(self.source, "touched_site", True):
+                    self._backoff = 0.0
+                    self._errors = 0
+                # worked out AFTER the fetch, so it sees what that fetch did (items just read, a check just completed)
+                wait = pause() if pause else max(self.cfg["interval_ms"], floor) / 1000.0
                 self.on_listings(listings)
                 note = getattr(self.source, "note", "")
                 self.on_status(f"OK - {len(listings)} listings @ {time.strftime('%H:%M:%S')}"
                                + (f" - {note}" if note else ""))
             except RateLimited as e:
-                self._backoff = min(max(self._backoff * 2, e.retry_after), MAX_BACKOFF_S)
-                wait = self._backoff
-                self.on_status(f"Rate limited - waiting {wait:.0f}s")
+                # honor Retry-After, but never retry sooner than the last wait doubled (the site said "slow down")
+                asked = float(e.retry_after)
+                self._backoff = min(max(self._backoff * 2, asked, ERROR_BACKOFF_MIN_S), MAX_BACKOFF_S)
+                # never longer than MAX_BACKOFF_S, whatever the header says (a huge value or a far-off date)
+                wait = min(max(self._backoff * random.uniform(1.0, 1.2), asked), MAX_BACKOFF_S)
+                why = (f"the site asked for {fmt_wait(asked)}" + (f", capped at {fmt_wait(MAX_BACKOFF_S)}"
+                                                                  if asked > MAX_BACKOFF_S else "")
+                       if asked >= ERROR_BACKOFF_MIN_S else "backing off")
+                self.on_status(f"Rate limited by the site - waiting {fmt_wait(wait)} before trying again ({why})")
             except ChallengeDetected as e:
                 self.on_status(f"PAUSED: {e}")
                 return  # never try to get around it
             except Exception as e:  # network error, bad page, bad mapping...
-                self._backoff = min(max(self._backoff * 2, 10.0), MAX_BACKOFF_S)
-                wait = self._backoff
-                self.on_status(f"Error: {e} (retry in {wait:.0f}s)")
+                self._errors += 1
+                self._backoff = min(max(self._backoff * 2, ERROR_BACKOFF_MIN_S), MAX_BACKOFF_S)
+                wait = self._backoff * random.uniform(1.0, 1.2)
+                self.on_status(f"Error: {e} (retry in {fmt_wait(wait)})")
             # Keep the pause responsive during the idle interval. A pause requested
             # during fetch() takes effect after that complete fetch pass.
             remaining = max(float(wait), 0.0)
@@ -357,8 +384,48 @@ class Poller(threading.Thread):
                 remaining -= min(remaining, time.monotonic() - started)
 
 
+# Sound players found on Linux systems without installing anything: PulseAudio / PipeWire-Pulse (paplay),
+# PipeWire (pw-play: Fedora, Bazzite, SteamOS, CachyOS, Ubuntu 22.10+), ALSA (aplay), SoX (play), FFmpeg (ffplay).
+LINUX_PLAYERS = ("paplay", "pw-play", "aplay", "play", "ffplay")
+
+
+def linux_player(path: str) -> Optional[list]:
+    for c in LINUX_PLAYERS:
+        if shutil.which(c):
+            if c == "aplay":
+                return [c, "-q", path]
+            if c == "play":
+                return [c, "-q", path]
+            if c == "ffplay":
+                return [c, "-nodisp", "-autoexit", "-loglevel", "quiet", path]
+            return [c, path]
+    return None
+
+
+def fmt_wait(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    return f"{seconds:.0f}s" if seconds < 120 else f"{seconds / 60:.0f} min"
+
+
+def parse_retry_after(value, default: float = RATE_LIMIT_DEFAULT_S) -> float:
+    """Seconds from a Retry-After header: a number of seconds or an HTTP date. Anything else = default."""
+    v = (value or "").strip()
+    if not v:
+        return default
+    try:
+        return max(float(v), 1.0)
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(v)
+        return max(when.timestamp() - time.time(), 1.0)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return default
+
+
 # ------------------------------------------------------------------ listing helpers
-ROTATE_MIN_S, ROTATE_MAX_S = 1.0, 600.0  # limits of the delay between two items in the rotating windows mode
+ROTATE_MIN_S, ROTATE_MAX_S = 10.0, 600.0  # limits of the delay between two items in the rotating windows mode
 
 
 def rotate_delay_range(cfg: "Config") -> tuple[float, float]:
@@ -368,9 +435,28 @@ def rotate_delay_range(cfg: "Config") -> tuple[float, float]:
             return float(cfg[key])
         except (KeyError, TypeError, ValueError):
             return default
-    lo = min(max(num("rotate_delay_min_s", 5.0), ROTATE_MIN_S), ROTATE_MAX_S)
-    hi = min(max(num("rotate_delay_max_s", 20.0), lo), ROTATE_MAX_S)
+    lo = min(max(num("rotate_delay_min_s", 20.0), ROTATE_MIN_S), ROTATE_MAX_S)
+    hi = min(max(num("rotate_delay_max_s", 40.0), lo), ROTATE_MAX_S)
     return lo, hi
+
+
+def _cfg_float(cfg: "Config", key: str, default: float) -> float:
+    try:
+        return float(cfg[key])
+    except (KeyError, TypeError, ValueError):
+        return default
+
+
+def pass_pause_s(cfg: "Config") -> float:
+    """One-window mode: a random pause between two passes, pass_delay_min_s..pass_delay_max_s (at least 60 s)."""
+    lo = max(_cfg_float(cfg, "pass_delay_min_s", 180.0), PASS_DELAY_FLOOR_S)
+    hi = max(_cfg_float(cfg, "pass_delay_max_s", 300.0), lo)
+    return random.uniform(lo, hi)
+
+
+def item_revisit_s(cfg: "Config") -> float:
+    """Shortest time between two reads of the same watched item (at least ITEM_REVISIT_FLOOR_S)."""
+    return max(_cfg_float(cfg, "item_revisit_min_s", 180.0), ITEM_REVISIT_FLOOR_S)
 
 
 def random_pause_s(cfg: "Config") -> float:
@@ -1002,12 +1088,7 @@ class Beeper:
                 import winsound
                 winsound.PlaySound(f, winsound.SND_FILENAME | winsound.SND_ASYNC)
                 return True
-            cmd = ["afplay", f] if sys.platform == "darwin" else None
-            if cmd is None:
-                for c in ("paplay", "aplay", "play"):
-                    if shutil.which(c):
-                        cmd = [c, "-q", f] if c == "aplay" else [c, f]
-                        break
+            cmd = ["afplay", f] if sys.platform == "darwin" else linux_player(f)
             if cmd and shutil.which(cmd[0]):
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True

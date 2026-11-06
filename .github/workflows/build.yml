@@ -4,6 +4,10 @@ name: Build
 # You can also start it by hand under Actions -> Build -> Run workflow. Tick "Publish a release" to
 # create the tag (vVERSION, from mesowatcher/core.py) and release from the selected branch; leave it
 # unticked to only produce downloadable Artifacts.
+#
+# Every download is portable: nothing to install. Windows uses the Edge that ships with Windows; the Linux and
+# macOS downloads carry their own Chromium. The Linux program is built on Debian 11 (glibc 2.31) so it runs on
+# any current distribution, and the linux-compat job starts the finished download on several of them.
 on:
   push:
     tags:
@@ -23,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -32,14 +36,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Linux system packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk xvfb alsa-utils
-
       - name: Install dependencies
         run: python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Chromium shipped inside the program (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --no-shell chromium
+          echo "PLAYWRIGHT_BROWSERS_PATH=0" >> "$GITHUB_ENV"
 
       - name: Check tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/v')
@@ -51,23 +56,27 @@ jobs:
             exit 1
           fi
 
-      - name: Tests (Linux)
-        if: runner.os == 'Linux'
-        run: xvfb-run -a python -m pytest -q
-
-      - name: Tests (Windows, macOS)
-        if: runner.os != 'Linux'
+      - name: Tests
         run: python -m pytest -q
 
       - name: Self-test of the program (window, Live Feed, browser driver)
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python run.py --selftest
-          elif [ "$RUNNER_OS" = "macOS" ]; then python run.py --selftest --no-gui
+          if [ "$RUNNER_OS" = "macOS" ]; then python run.py --selftest --no-gui
           else python run.py --selftest; fi
 
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean mesowatcher.spec
+
+      - name: Put Chromium into the app (macOS)
+        if: runner.os == 'macOS'
+        run: python tools/add_browser_macos.py
+
+      - name: Self-test of the built program (macOS, its own Chromium)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          env -u PLAYWRIGHT_BROWSERS_PATH dist/*.app/Contents/MacOS/* --selftest --no-gui --browser
 
       - name: Package
         run: python tools/package.py
@@ -78,9 +87,203 @@ jobs:
           path: release/*
           if-no-files-found: error
 
+  build-linux:
+    runs-on: ubuntu-latest
+    # Debian 11 = glibc 2.31: the program then starts on every distribution with glibc 2.31 or newer
+    # (Ubuntu 20.04+, Debian 11+, Fedora, RHEL/Rocky/Alma 9, openSUSE, Arch, CachyOS, SteamOS, Bazzite, ...).
+    container: python:3.12-bullseye
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: "0"  # Chromium goes into the Playwright package, so PyInstaller ships it
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: System packages (build machine only; the finished program needs none of them)
+        run: |
+          # DELIBERATE: Debian 11 is end-of-life. It is used only as the BUILD machine, because its old glibc (2.31)
+          # is what makes one download run on every current distribution; nothing from it runs on its own. Its
+          # packages now live on archive.debian.org (over HTTPS; apt still checks their signatures). The archive's
+          # Release files no longer get new dates, hence Check-Valid-Until=false. Move to the next old-enough base
+          # (or a manylinux-style image) if this archive ever goes away.
+          rm -f /etc/apt/sources.list.d/*
+          printf '%s\n' \
+            'deb https://archive.debian.org/debian bullseye main' \
+            'deb https://archive.debian.org/debian bullseye-updates main' \
+            'deb https://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
+          apt-get install -y --no-install-recommends binutils xvfb xauth alsa-utils fonts-liberation \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libexpat1 libasound2 \
+            libpango-1.0-0 libcairo2 libgtk-3-0 libdbus-1-3
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Chromium shipped inside the program
+        # Playwright's installer only knows newer Debian releases by name; the Linux Chromium build is the same for
+        # all of them (it needs glibc 2.25), so download that one. The tests below then run it on this machine.
+        env:
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian12-x64
+        run: python -m playwright install --no-shell chromium
+
+      - name: Check tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          app_version=$(python tools/version.py)
+          if [ "v$app_version" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match VERSION $app_version in mesowatcher/core.py"
+            exit 1
+          fi
+
+      - name: Tests
+        run: xvfb-run -a python -m pytest -q
+
+      - name: Self-test of the program (window, Live Feed, browser driver)
+        run: xvfb-run -a python run.py --selftest
+
+      - name: Fallback libraries for systems that lack them
+        run: python tools/bundle_browser_libs.py
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --noconfirm --clean mesowatcher.spec
+
+      - name: Highest glibc version the program needs
+        run: |
+          need=$(find dist -type f \( -name '*.so*' -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null \
+                 | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "Needs $need"
+          [ "$(printf '%s\nGLIBC_2.31\n' "$need" | sort -V | tail -1)" = "GLIBC_2.31" ] || { echo "too new"; exit 1; }
+
+      - name: Package
+        run: python tools/package.py
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-Linux
+          path: release/*
+          if-no-files-found: error
+
+  # Start the finished Linux download on other distributions: the window (under a virtual screen) and its own
+  # Chromium. Each image gets only what a normal desktop install already has (GTK, Mesa, sound library, X), never
+  # Python, Tk or a browser.
+  # Official images (Ubuntu, Debian, Fedora, openSUSE, Arch) block a release if the download fails there.
+  # Third-party images (CachyOS, SteamOS Holo, Bazzite) are informational: a failed or flaky registry pull shows as
+  # a failed check but never blocks a release. Images are not pinned on purpose: these jobs exist to try the
+  # download on the CURRENT release of each distribution. They only unpack and start the download, with a
+  # read-only token, so a changed image cannot reach anything.
+  linux-compat:
+    needs: build-linux
+    continue-on-error: ${{ matrix.optional }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Ubuntu 22.04
+            image: ubuntu:22.04
+            optional: false
+            prep: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-3-0 libgbm1 libasound2 xvfb tar gzip
+          - distro: Debian 12
+            image: debian:12
+            optional: false
+            prep: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libgbm1 libasound2 xvfb tar gzip
+          - distro: Fedora
+            image: fedora:latest
+            optional: false
+            prep: dnf install -y gtk3 mesa-libgbm alsa-lib xorg-x11-server-Xvfb tar gzip findutils
+          - distro: openSUSE Tumbleweed
+            image: opensuse/tumbleweed:latest
+            optional: false
+            prep: zypper -n install libgtk-3-0 libgbm1 libasound2 xorg-x11-server-Xvfb dejavu-fonts tar gzip findutils
+          - distro: Arch Linux
+            image: archlinux:latest
+            optional: false
+            prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
+          - distro: CachyOS
+            image: cachyos/cachyos:latest
+            optional: true
+            prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
+          - distro: SteamOS (Holo base)
+            image: ghcr.io/steamdeckhomebrew/holo-base:latest
+            optional: true
+            prep: pacman -Sy --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
+    container: ${{ matrix.image }}
+    name: Linux on ${{ matrix.distro }}
+    steps:
+      - name: What a desktop install already has
+        run: ${{ matrix.prep }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-Linux
+          path: dl
+
+      - name: Unpack the download
+        run: |
+          mkdir app && tar -xzf dl/*.tar.gz -C app
+          ls app
+
+      - name: Self-test of the download (window + its own Chromium)
+        run: |
+          exe=$(find app -maxdepth 2 -type f -name 'MSCW Market Watcher v*' -perm -u+x | head -1)
+          echo "Running: $exe"
+          if command -v Xvfb >/dev/null; then
+            Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+            export DISPLAY=:99
+            sleep 2
+            "$exe" --selftest --browser
+          else
+            "$exe" --selftest --no-gui --browser  # no virtual screen in this image: the browser part only
+          fi
+
+      - name: Diagnose the shipped Chromium (only when the self-test failed)
+        if: failure()
+        run: |
+          chrome=$(find app -type f -name chrome -path '*chrome-linux*' | head -1)
+          echo "Chromium: $chrome"
+          echo "--- libraries it cannot find on this system:"
+          ldd "$chrome" | grep "not found" || echo "(none)"
+          echo "--- starting it directly:"
+          "$chrome" --headless --no-sandbox --disable-gpu --dump-dom 'data:text/html,<p>ok</p>' 2>&1 | tail -20 || true
+          echo "--- starting it with the program's fallback libraries (as the program does):"
+          libs=$(find app -type d -name browser-libs | head -1)
+          mkdir -p fb/nss
+          for f in "$PWD/$libs"/*; do ln -sf "$f" fb/; done
+          for m in libsoftokn3.so libfreebl3.so libfreeblpriv3.so; do ln -sf "$PWD/$libs/$m" fb/nss/; done
+          LD_LIBRARY_PATH="$PWD/fb" "$chrome" --headless --no-sandbox --disable-gpu --dump-dom \
+            'data:text/html,<p>ok</p>' 2>&1 | tail -30 || true
+
+  # Bazzite's image has more layers than Docker can stack ("max depth exceeded"), so it is started with Podman.
+  # It is a complete desktop system: nothing is added to it, and the browser part runs headless.
+  linux-bazzite:
+    needs: build-linux
+    continue-on-error: true  # informational, see linux-compat; not needed by the release
+    runs-on: ubuntu-latest
+    name: Linux on Bazzite
+    steps:
+      - name: Room for the Bazzite image (about 10 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-Linux
+          path: dl
+
+      - name: Unpack the download
+        run: mkdir app && tar -xzf dl/*.tar.gz -C app
+
+      - name: Self-test of the download on Bazzite
+        run: |
+          podman pull ghcr.io/ublue-os/bazzite:stable
+          podman run --rm -v "$PWD/app:/app:Z" ghcr.io/ublue-os/bazzite:stable sh -c '
+            cat /etc/os-release | head -3
+            exe=$(find /app -maxdepth 2 -type f -name "MSCW Market Watcher v*" -perm -u+x | head -1)
+            "$exe" --selftest --no-gui --browser'
+
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
-    needs: build
+    needs: [build, build-linux, linux-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write

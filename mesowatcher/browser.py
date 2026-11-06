@@ -4,7 +4,11 @@ and reads the "Newest" listings (seller, channel, location, price, time since li
 What this does and does not do:
   * It is an ordinary browser (Edge/Chrome through Playwright) with its own saved profile.
   * It acts like a person would: type in the filter box, click the item, read the list, with a
-    pause (default 1.5 s, never under 0.5 s) between actions. One item at a time.
+    pause (never under 0.5 s) between actions. One item at a time, and each item at most once every few
+    minutes (core.item_revisit_s); one pass, then a pause of minutes (core.pass_pause_s).
+  * By default it runs as a real headless browser (no window). A window opens only when a person is needed.
+  * Every response from the site is watched: a 429/503 to ANY request (also the ones the page makes in the
+    background after a click or scroll) ends the step and the poller waits (Retry-After, then backoff).
   * If Cloudflare shows a "Just a moment" check, it STOPS. Turn on "Show browser window" in
     Settings, press Start and complete the check yourself; it carries on when the page loads.
   * Rows are recognised by their visible text (a price followed by "each", "3m ago", "CH 14",
@@ -23,9 +27,9 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 
-from . import errorlog
-from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, norm, parse_number,
-                   random_pause_s, rotate_delay_range)
+from . import errorlog, portable
+from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, fmt_wait, item_revisit_s, norm,
+                   parse_number, parse_retry_after, pass_pause_s, random_pause_s, rotate_delay_range)
 
 _AGO_RE = re.compile(r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|[smhd])\b\s*ago|just now", re.I)
 _CH_RE = re.compile(r"(?<![A-Za-z])CH\s*\.?\s*(\d+)(?!\d)", re.I)
@@ -40,7 +44,7 @@ _SEEN_RE = re.compile(r"seen\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s+(\d{1,2}):(\d{2})\
 _MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 _MESOS_TITLE_RE = re.compile(r"^\s*([\d,]+)\s*mesos\s*$", re.I)  # tooltip: "44,999 mesos"
 
-RELOAD_EVERY = 10  # full page reload every N cycles, to recover from a stale page
+RELOAD_AFTER_S = 2 * 3600  # one-window mode: reload the page at most this often, to recover from a stale page
 MAX_RESULTS_TRIED = 6  # default for "most search results opened, one after the other, to find the item" (Settings)
 _ICON_ID_RE = re.compile(r"(?<!\d)(\d{5,9})(?!\d)")
 
@@ -375,17 +379,38 @@ class BrowserSource:
 
     @property
     def windows_mode(self) -> bool:
-        return (self.bc.get("scan_mode") or "windows") == "windows"
+        return (self.bc.get("scan_mode") or "single") == "windows"
 
     def pause_s(self) -> float:
-        """Random pause before the next fetch: windows mode = the user's delay between items (1-600 s);
-        otherwise 500-5000 ms between passes."""
+        """Pause before the next fetch. Windows mode: the user's delay between items (10-600 s), longer when no
+        item is due yet (each item is read at most once per item_revisit_s). One-window mode: minutes between
+        passes (pass_pause_s), and never sooner than item_revisit_s after the last pass started. After a
+        Cloudflare check was completed: at least challenge_cooldown_s."""
         if self.windows_mode:
             if self._watching:  # passive: a cheap local check of the windows, no clicks
-                return min(max(self._num(self.bc.get("watch_check_s"), 5.0), 1.0), 600.0)
-            lo, hi = rotate_delay_range(self.cfg)
-            return random.uniform(lo, hi)
-        return random_pause_s(self.cfg)
+                wait = min(max(self._num(self.bc.get("watch_check_s"), 5.0), 1.0), 600.0)
+            else:
+                lo, hi = rotate_delay_range(self.cfg)
+                wait = max(random.uniform(lo, hi), self._next_due_in())
+        else:
+            since = time.time() - self._pass_started if self._pass_started else 0.0
+            wait = max(pass_pause_s(self.cfg), item_revisit_s(self.cfg) - since)
+        cool = self._cooldown_until - time.time()
+        if cool > wait:
+            self.note = (self.note + "; " if self.note else "") + f"cooling down {fmt_wait(cool)} after the check"
+            wait = cool
+        return wait
+
+    def _next_due_in(self) -> float:
+        """Windows mode: seconds until the next item may be read again (0 when one is due or needs setting up)."""
+        names = [n.lower() for n in self._watch_names()]
+        if any(n not in self._sessions for n in names):
+            # an item still needs its page (or waits to be tried again): step again after the normal delay. Such a
+            # step contacts the site only when an item is actually set up, and that obeys the delay between items.
+            return 0.0
+        floor, now = item_revisit_s(self.cfg), time.time()
+        due = [s.last_read + floor - now for k, s in self._sessions.items() if k in names]
+        return max(min(due), 0.0) if due else 0.0
 
     def __init__(self, cfg, profile_dir: Optional[Path] = None):
         self.cfg = cfg
@@ -407,6 +432,14 @@ class BrowserSource:
         self._force_visible = False  # set once the window was opened because something went wrong
         self.mode = ""  # "window", "background (off-screen window)" or "background (headless)"
         self._logged: set = set()
+        self._host = ""  # the site's host name: only its responses count for rate limiting
+        self._limited: Optional[float] = None  # set by the response listener: seconds the site asked us to wait
+        self._limited_at = 0.0  # ... and when that answer came (pages refresh by themselves, maybe minutes ago)
+        self._limited_what = ""
+        self.touched_site = True  # did the last fetch() make the browser contact the site? (see core.Poller)
+        self._cooldown_until = 0.0  # no reads before this time (after a Cloudflare check)
+        self._pass_started = 0.0  # one-window mode: when the last pass began
+        self._loaded_at = 0.0  # one-window mode: when the start page was last loaded
 
     # ---- helpers
     @property
@@ -422,6 +455,46 @@ class BrowserSource:
         lo = max(int(self.cfg["delay_min_ms"]), 500)
         hi = max(int(self.cfg["delay_max_ms"]), lo)
         time.sleep(random.uniform(lo, lo + (hi - lo) * min(mult, 1.0)) / 1000.0)
+        self._check_limited()
+
+    # ---- rate limits seen on ANY response from the site (not only page loads)
+    def _same_site(self, url: str) -> bool:
+        try:
+            h = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return False
+        return bool(self._host) and (h == self._host or h.endswith("." + self._host))
+
+    def _on_response(self, resp):
+        """Playwright calls this for every response the browser gets (page loads, and the requests the page makes
+        by itself after a click or a scroll). A 429/503 from the site means "slow down": it is remembered here and
+        the scan stops at the next check (_check_limited) so the poller can wait. Cloudflare check pages
+        (cf-mitigated) are left to the challenge handling."""
+        try:
+            if resp.status not in (429, 503) or not self._same_site(resp.url):
+                return
+            headers = resp.headers
+            if headers.get("cf-mitigated", "").lower() == "challenge":
+                return
+            wait = parse_retry_after(headers.get("retry-after"))
+            now = time.time()
+            if self._limited is None or now + wait > self._limited_at + self._limited:  # keep the later end
+                self._limited, self._limited_at = wait, now
+            self._limited_what = f"HTTP {resp.status} for {urlparse(resp.url).path or '/'}"
+        except Exception:
+            pass
+
+    def _check_limited(self):
+        if self._limited:
+            # the answer may be old (a page's own refresh, minutes before this step): only the rest of the wait counts
+            wait = self._limited - (time.time() - self._limited_at)
+            what = self._limited_what
+            self._limited, self._limited_what = None, ""
+            if wait <= 0:
+                self._act(f"The site had asked us to slow down ({what}); that wait is already over")
+                return
+            self._act(f"The site asked us to slow down ({what}); stopping this step and waiting {fmt_wait(wait)}")
+            raise RateLimited(wait)
 
     def _act(self, msg: str):
         errorlog.action(msg)
@@ -452,50 +525,38 @@ class BrowserSource:
         # Playwright adds --no-sandbox by default, which makes Chromium show an "unsupported
         # command-line flag" bar. Keep the sandbox on; only a Linux root user (containers) needs it off.
         no_sandbox = sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
-        # Background work: a normal browser window is opened far off-screen (it behaves exactly like the window you
-        # can see; a headless browser is treated differently by many sites). Only without a screen is it truly
-        # headless. If something goes wrong the window is opened on screen so you can look at it.
-        args, headless = [], False
-        if self.windows_mode:
-            self._force_visible = True  # the item windows are taken in turns, so they are real, visible windows
-        if self.windows_mode:
-            # the windows stay open for hours: keep them fully alive even when another window is in front
-            args = ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-                    "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
-        if self.background:
-            if self._can_show():
-                args = ["--window-position=-32000,-32000", "--window-size=1500,900",
-                        "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-                        "--disable-background-timer-throttling",
-                        "--disable-features=CalculateNativeWinOcclusion"]
-                self.mode = "background (off-screen window)"
-            else:
-                headless = True
-                self.mode = "background (headless, no screen available)"
-        else:
-            self.mode = "window"
+        # Background work runs in a real headless browser (no window at all). Only when a person is needed (a
+        # Cloudflare check, a refused request, a failed Settings test) is a visible window opened. The browser's
+        # normal background throttling is left on, so pages that are not being read do as little as possible.
+        args: list = []
+        headless = self.background
+        self.mode = "background (headless)" if headless else "window"
         self._act(f"Opening the browser: {self.mode}, channel '{channel or 'chromium'}'")
         kw = dict(user_data_dir=str(self._profile or (data_dir() / "browser-profile")),
                   headless=headless, viewport={"width": 1500, "height": 900},
                   chromium_sandbox=not no_sandbox)
         if args:
             kw["args"] = args
-        if channel not in ("", "chromium"):
-            kw["channel"] = channel
+        # "chromium" is passed on explicitly: Playwright then uses the full Chromium (the one shipped with the Linux
+        # and macOS downloads) in Chrome's normal headless mode, not the separate headless-shell build.
+        channel = channel or "chromium"
+        kw["channel"] = channel
+        if channel == "chromium":
+            self._prepare_bundled_chromium(kw)
         try:
             try:
-                self._ctx = self._pw.chromium.launch_persistent_context(**kw)
+                self._ctx = self._launch(kw)
             except Exception as first:
                 if "Executable doesn't exist" not in str(first):
                     raise
-                # e.g. "chromium" in the packaged program (no browser is bundled): use one installed on this computer
-                self._act(f"Browser '{channel or 'chromium'}' is not installed; trying the installed ones")
+                # the chosen browser is not on this computer: try the others (the shipped Chromium first)
+                self._act(f"Browser '{channel}' is not installed; trying the others")
                 self._ctx = None
-                for alt in ("msedge", "chrome"):
+                for alt in ("chromium", "msedge", "chrome"):
                     if alt == channel:
                         continue
                     try:
-                        self._ctx = self._pw.chromium.launch_persistent_context(**{**kw, "channel": alt})
+                        self._ctx = self._launch({k: v for k, v in kw.items() if k != "env"} | {"channel": alt})
                         self._act(f"Using '{alt}' instead of '{channel or 'chromium'}'")
                         self._say(f"'{channel or 'chromium'}' is not installed; using {alt} instead.")
                         break
@@ -508,9 +569,42 @@ class BrowserSource:
             errorlog.write("The browser could not be started", e, {"browser": channel or "chromium", "mode": self.mode})
             raise RuntimeError(f"Could not start the browser '{channel or 'chromium'}': {_short(e)}. "
                                "Pick another browser in Settings (msedge, chrome or chromium).")
+        self._host = (urlparse(self.bc.get("start_url") or "").hostname or "").lower()
+        self._limited, self._limited_what = None, ""
+        self._ctx.on("response", self._on_response)
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._spare = self._page
         self._page.set_default_timeout(int(self.bc["page_timeout_ms"]))
+
+    def _prepare_bundled_chromium(self, kw: dict):
+        """Linux: give the shipped Chromium any shared library this computer lacks (see portable.browser_env)."""
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            exe = self._pw.chromium.executable_path
+        except Exception:
+            return
+        if not exe or not os.path.exists(exe):
+            return
+        work = portable.libs_work_dir(data_dir() / "browser-libs-active")
+        env, still = portable.browser_env(exe, work)
+        if env is not None:
+            kw["env"] = env
+            self._act("Using the program's own copies of libraries this computer does not have: "
+                      + ", ".join(sorted(p.name for p in work.iterdir())))
+        if still:
+            self._act("Chromium may not start: this computer lacks " + ", ".join(still))
+
+    def _launch(self, kw: dict):
+        """Start the browser. If the OS blocks Chromium's sandbox (Ubuntu 24.04+ AppArmor rule, some containers),
+        start it once more without the sandbox, as Playwright does by default."""
+        try:
+            return self._pw.chromium.launch_persistent_context(**kw)
+        except Exception as e:
+            if not kw.get("chromium_sandbox") or not portable.is_sandbox_error(e):
+                raise
+            self._act("The system does not allow Chromium's sandbox here; starting it without the sandbox")
+            return self._pw.chromium.launch_persistent_context(**{**kw, "chromium_sandbox": False})
 
     def close(self):
         for obj, meth in ((self._ctx, "close"), (self._pw, "stop")):
@@ -560,25 +654,33 @@ class BrowserSource:
                                         "If the check keeps asking again after you click it, the site is not "
                                         "accepting this browser session.")
             if not self._is_challenge(page):
-                self._act("The Cloudflare check was completed")
+                cool = max(self._num(self.cfg.data.get("challenge_cooldown_s"), 900.0), 0.0)
+                self._cooldown_until = time.time() + cool
+                self._act(f"The Cloudflare check was completed; the next read waits at least {fmt_wait(cool)}")
                 return True
         raise ChallengeDetected(f"The Cloudflare check was not completed within {limit} s.")
 
-    def _escalate(self, reason: str, exc: Optional[BaseException] = None, goto: bool = True):
+    def _escalate(self, reason: str, exc: Optional[BaseException] = None, goto: bool = True, show: bool = True):
         """Something needs a person: write the error log, then reopen the browser WINDOW on the site. Returns the
-        new page (None when there is no screen to open it on)."""
+        new page (None when there is no screen to open it on). With show=False (an ordinary error that the poller
+        retries after a backoff) only the log is written: the browser is not restarted and nothing is loaded."""
         key = (reason, type(exc).__name__ if exc else "")
         path = None
         if key not in self._logged:
             self._logged.add(key)
             path = errorlog.write(reason, exc, self._context())
         self._say(f"{reason}" + (f" - details saved to {path}" if path else ""))
+        if not show:
+            return self._page
         if not self.background:
             return self._page
         if not self._can_show():
             return None
         self._act(f"Opening the browser window for you ({reason})")
         self.close()
+        # From here on this session stays in the visible window, also after the check was completed: Cloudflare's
+        # clearance is tied to the browser it was given to, and a headless browser would just be checked again.
+        # The next Start (or restart of the program) runs headless again.
         self._force_visible = True
         try:
             self._open()
@@ -648,6 +750,8 @@ class BrowserSource:
             page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
+        self._loaded_at = time.time()
+        self._check_limited()
         return resp
 
     def _filter_box(self, page):
@@ -660,7 +764,7 @@ class BrowserSource:
         return loc.first
 
     def _ensure_loaded(self, page):
-        reload_due = self._cycles % RELOAD_EVERY == 1
+        reload_due = not self._loaded_at or time.time() - self._loaded_at > RELOAD_AFTER_S
         if reload_due or self._filter_box(page).count() == 0:
             self._goto_start(page)
         try:
@@ -916,6 +1020,7 @@ class BrowserSource:
         self.scroll_info = info
         stalls = 0
         for step in range(max_steps + 1):
+            self._check_limited()  # scrolling makes the page load more rows: stop at once if the site said "slow down"
             reached_old, total, parsed = False, 0, 0
             for r in page.evaluate(_READ_ROWS_JS, sel):
                 total += 1
@@ -1091,6 +1196,8 @@ class BrowserSource:
         if target is None and not live:
             self.note = "waiting to try the items that could not be opened again"
             return []
+        floor = item_revisit_s(self.cfg)
+        due = [n for n in live if now - self._sessions[n.lower()].last_read >= floor]
         total = len(names)
         self._watching = bool(self.bc.get("passive_updates")) and target is None and bool(live)
         if self._watching:
@@ -1098,10 +1205,18 @@ class BrowserSource:
         try:
             if target is not None:
                 kind, name = "set up", target
+                self.touched_site = True
                 ls, note = self._setup_session(name)
+            elif not due:
+                self.note = (f"every item was read in the last {fmt_wait(floor)}; "
+                             f"next read in {fmt_wait(self._next_due_in())}")
+                return []
             else:
-                kind, name = "refreshed", live[self._turn % len(live)]
-                self._turn += 1
+                kind = "refreshed"
+                order = live[self._turn % len(live):] + live[:self._turn % len(live)]
+                name = next(n for n in order if n in due)  # the next window in turn that is due
+                self._turn = live.index(name) + 1
+                self.touched_site = True
                 ls, note = self._refresh_session(name)
         except (ChallengeDetected, RateLimited):
             raise
@@ -1123,14 +1238,22 @@ class BrowserSource:
             page.bring_to_front()
         except Exception:
             pass
-        self._goto_start(page)
+        try:
+            self._goto_start(page)
+        except RateLimited:
+            self._release_page(page)
+            raise
         try:
             self._filter_box(page).wait_for(state="visible")
         except Exception:
             self._release_page(page)
             raise RuntimeError(f"Could not find the item filter box ('{self.bc['filter_placeholder']}') "
                                "on the page. Check the start URL and the filter text in Settings.")
-        ls, note = self._monitor(page, name)
+        try:
+            ls, note = self._monitor(page, name)
+        except RateLimited:
+            self._release_page(page)
+            raise
         if self._selected:
             s = self._sessions[name.lower()] = _Session(page, name, self._used)
             self._mark_read(s, len(ls))
@@ -1177,6 +1300,8 @@ class BrowserSource:
         clicked, no window is brought to the front). A list that changed is read as usual. A list that did not
         change for `watch_stale_min` minutes is refreshed once with the usual click, in case the page stalled."""
         stale_s = max(self._num(self.bc.get("watch_stale_min"), 10.0), 0.0) * 60.0
+        if stale_s:
+            stale_s = max(stale_s, item_revisit_s(self.cfg))  # a click refresh obeys the per-item floor too
         out: list[Listing] = []
         changed, refreshed = [], []
         for name in live:
@@ -1190,6 +1315,7 @@ class BrowserSource:
                 now = time.time()
                 if stale_s and now - max(s.last_change, s.last_read) > stale_s:
                     self._act(f"'{name}': no change for {stale_s / 60:g} min - refreshing it once with a click")
+                    self.touched_site = True
                     ls, _note = self._refresh_session(name)
                     out += ls
                     refreshed.append(name)
@@ -1263,6 +1389,7 @@ class BrowserSource:
 
     # ---- poller interface
     def fetch(self) -> list[Listing]:
+        self.touched_site = False  # set by every step below that loads, types or clicks on the site
         try:
             return self._fetch()
         except RateLimited:
@@ -1271,7 +1398,8 @@ class BrowserSource:
             self._escalate("Stopped by a Cloudflare check / refused access", e)
             raise
         except Exception as e:
-            self._escalate(f"An error stopped the scan: {_short(e)}", e)
+            # an ordinary error: log it and let the poller back off; do not restart the browser or load the site
+            self._escalate(f"An error stopped the scan: {_short(e)}", e, show=False)
             raise
 
     def _fetch(self) -> list[Listing]:
@@ -1284,7 +1412,9 @@ class BrowserSource:
             return []
         self._open()
         page = self._page
+        self.touched_site = True
         self._cycles += 1
+        self._pass_started = time.time()
         self._ensure_loaded(page)
         out: list[Listing] = []
         notes: list[str] = []
