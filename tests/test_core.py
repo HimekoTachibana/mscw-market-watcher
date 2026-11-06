@@ -106,6 +106,40 @@ def test_poller_pauses_on_challenge_and_never_retries(cfg):
     assert msgs and msgs[0].startswith("PAUSED")
 
 
+def test_poller_pause_and_resume(cfg):
+    class Source:
+        pause_s = staticmethod(lambda: 0.05)
+
+        def __init__(self):
+            self.calls = 0
+            self.first = threading.Event()
+
+        def fetch(self):
+            self.calls += 1
+            self.first.set()
+            return []
+
+        def close(self):
+            pass
+
+    src = Source()
+    p = core.Poller(src, cfg, lambda ls: None, lambda status: None)
+    p.start()
+    assert src.first.wait(2)
+    p.pause()
+    time.sleep(0.35)
+    calls_while_paused = src.calls
+    assert p.is_paused
+    p.resume()
+    deadline = time.time() + 2
+    while src.calls == calls_while_paused and time.time() < deadline:
+        time.sleep(0.02)
+    p.stop()
+    p.join(timeout=2)
+    assert calls_while_paused >= 1
+    assert src.calls > calls_while_paused
+
+
 def test_interval_floor(cfg):
     cfg["interval_ms"] = 10
     seen = []
