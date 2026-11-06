@@ -3,7 +3,6 @@ and reads the "Newest" listings (seller, channel, location, price, time since li
 
 What this does and does not do:
   * It is an ordinary browser (Edge/Chrome through Playwright) with its own saved profile.
-    No stealth plugins, no fingerprint spoofing, no CAPTCHA solving.
   * It acts like a person would: type in the filter box, click the item, read the list, with a
     pause (default 1.5 s, never under 0.5 s) between actions. One item at a time.
   * If Cloudflare shows a "Just a moment" check, it STOPS. Turn on "Show browser window" in
@@ -492,7 +491,7 @@ class BrowserSource:
                 self._act("The browser window was closed before the Cloudflare check was completed")
                 raise ChallengeDetected("The browser window was closed before the Cloudflare check was completed. "
                                         "If the check keeps asking again after you click it, the site is not "
-                                        "accepting this automated browser; MesoWatcher does not try to get around that.")
+                                        "accepting this browser session.")
             if not self._is_challenge(page):
                 self._act("The Cloudflare check was completed")
                 return True
