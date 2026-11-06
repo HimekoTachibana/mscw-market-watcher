@@ -21,7 +21,7 @@ def shipped(tmp_path, monkeypatch):
 
 @linux_only
 def test_nothing_is_changed_when_the_system_has_every_library(shipped, tmp_path, monkeypatch):
-    monkeypatch.setattr(portable, "missing_libs", lambda exe, extra="": [])
+    monkeypatch.setattr(portable, "missing_libs", lambda exe, extra="", also=(): [])
     assert portable.browser_env("/x/chrome", tmp_path / "active") == (None, [])
     assert not (tmp_path / "active").exists()
 
@@ -30,7 +30,7 @@ def test_nothing_is_changed_when_the_system_has_every_library(shipped, tmp_path,
 def test_only_missing_libraries_are_linked_and_nss_stays_together(shipped, tmp_path, monkeypatch):
     calls = []
 
-    def fake(exe, extra=""):
+    def fake(exe, extra="", also=()):
         calls.append(extra)
         return ["libcups.so.2", "libnss3.so"] if not extra else []
     monkeypatch.setattr(portable, "missing_libs", fake)
@@ -46,7 +46,7 @@ def test_only_missing_libraries_are_linked_and_nss_stays_together(shipped, tmp_p
 
 @linux_only
 def test_a_library_nobody_ships_is_reported(shipped, tmp_path, monkeypatch):
-    monkeypatch.setattr(portable, "missing_libs", lambda exe, extra="": ["libgbm.so.1"])
+    monkeypatch.setattr(portable, "missing_libs", lambda exe, extra="", also=(): ["libgbm.so.1"])
     env, still = portable.browser_env("/x/chrome", tmp_path / "active")
     assert still == ["libgbm.so.1"]  # never shipped: tied to the graphics driver
 
@@ -88,3 +88,17 @@ def test_children_get_the_system_library_path_back(monkeypatch):
     monkeypatch.setenv("LD_LIBRARY_PATH", "/app/_internal")
     portable.restore_system_library_path()  # nothing set before the launcher: removed entirely
     assert "LD_LIBRARY_PATH" not in os.environ
+
+
+@linux_only
+def test_what_the_nss_modules_need_is_linked_too(shipped, tmp_path, monkeypatch):
+    """NSS's crypto module is loaded at run time and needs SQLite, which ldd of Chromium alone cannot show."""
+    def fake(exe, extra="", also=()):
+        if not extra:
+            return ["libnss3.so"]
+        if any(str(a).endswith("libsoftokn3.so") for a in also) and not (tmp_path / "active" / "libsqlite3.so.0").exists():
+            return ["libsqlite3.so.0"]
+        return []
+    monkeypatch.setattr(portable, "missing_libs", fake)
+    env, still = portable.browser_env("/x/chrome", tmp_path / "active")
+    assert still == [] and (tmp_path / "active" / "libsqlite3.so.0").exists()

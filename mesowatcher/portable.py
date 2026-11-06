@@ -29,7 +29,8 @@ NSS_MODULES = ("libsoftokn3.so", "libfreebl3.so", "libfreeblpriv3.so")
 # sound-specific, nothing every desktop has anyway (glibc, X11/xcb, glib, cairo, pango, dbus).
 BUNDLED_LIBS = NSS_GROUP + ("libcups.so.2", "libatk-1.0.so.0", "libatk-bridge-2.0.so.0", "libatspi.so.0",
                             "libxkbcommon.so.0", "libXcomposite.so.1", "libXdamage.so.1", "libXfixes.so.3",
-                            "libXrandr.so.2", "libXext.so.6", "libexpat.so.1")
+                            "libXrandr.so.2", "libXext.so.6", "libexpat.so.1",
+                            "libsqlite3.so.0")  # needed by NSS's crypto module (loaded at run time)
 
 _NOT_FOUND_RE = re.compile(r"^\s*(\S+)\s+=>\s+not found", re.M)
 
@@ -92,8 +93,8 @@ def _elf_of(exe: str) -> str:
     return exe
 
 
-def missing_libs(exe: str, extra_path: str = "") -> list[str]:
-    """Shared libraries `exe` cannot find on this computer (empty when ldd is not available)."""
+def missing_libs(exe: str, extra_path: str = "", also: tuple = ()) -> list[str]:
+    """Shared libraries `exe` (and the files in `also`) cannot find on this computer (empty without ldd)."""
     ldd = shutil.which("ldd")
     if not ldd or not sys.platform.startswith("linux"):
         return []
@@ -101,7 +102,8 @@ def missing_libs(exe: str, extra_path: str = "") -> list[str]:
     if extra_path:
         env["LD_LIBRARY_PATH"] = extra_path + (os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
     try:
-        out = subprocess.run([ldd, _elf_of(exe)], capture_output=True, text=True, timeout=20, env=env).stdout
+        files = [_elf_of(exe)] + [str(f) for f in also if os.path.exists(f)]
+        out = subprocess.run([ldd, *files], capture_output=True, text=True, timeout=20, env=env).stdout
     except (OSError, subprocess.SubprocessError):
         return []
     return sorted(set(_NOT_FOUND_RE.findall(out)))
@@ -142,7 +144,9 @@ def browser_env(exe: str, work_dir: Path) -> tuple[Optional[dict], list[str]]:
                 except OSError:
                     shutil.copy2(src / n, target)
             linked.add(n)
-        missing = missing_libs(exe, str(work_dir))
+        # NSS's crypto modules are loaded at run time, so ldd of Chromium does not see what THEY need (SQLite)
+        modules = tuple(work_dir / m for m in NSS_MODULES if (work_dir / m).exists())
+        missing = missing_libs(exe, str(work_dir), modules)
         if not missing:
             break
     env = dict(os.environ)
