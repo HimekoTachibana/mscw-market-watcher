@@ -151,7 +151,7 @@ def test_meow_blocked_does_not_break_osms_update(db):
     STATE["meow_status"] = 403
     rep = db.update()
     assert "5 from OSMS Data Explorer, 0 only on MeowDB" in rep[0]
-    assert any("MeowDB: skipped" in line and "refused automated access" in line for line in rep)
+    assert any("MeowDB: skipped" in line and "refused the request" in line for line in rep)
     assert all(it["ok"] is None for it in db.items.values())
 
 
