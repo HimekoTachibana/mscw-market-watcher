@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import random
 import re
+from dataclasses import dataclass
 import sys
 import time
 from datetime import datetime, timedelta
@@ -24,7 +25,7 @@ from urllib.parse import unquote, urlparse
 
 from . import errorlog
 from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, norm, parse_number,
-                   random_pause_s)
+                   random_pause_s, rotate_delay_range)
 
 _AGO_RE = re.compile(r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|[smhd])\b\s*ago|just now", re.I)
 _CH_RE = re.compile(r"(?<![A-Za-z])CH\s*\.?\s*(\d+)(?!\d)", re.I)
@@ -320,6 +321,14 @@ def _short(e: Exception) -> str:
     return str(e).strip().splitlines()[0][:160] if str(e).strip() else e.__class__.__name__
 
 
+@dataclass
+class _Session:
+    """One watched item's own browser window (windows mode)."""
+    page: object
+    name: str
+    used: str = ""
+
+
 class BrowserSource:
     """Poller-compatible source: fetch() returns the current Newest listings of every watched item.
     Playwright objects belong to the thread that first calls fetch()/diagnose(), so use one
@@ -330,8 +339,18 @@ class BrowserSource:
     last_panels: list = []
     items = None  # optional ItemDB: lets the right-hand icon be checked against the item's id
 
+    RETRY_NOT_FOUND_S = 300  # windows mode: an item that could not be opened is tried again after this long
+
+    @property
+    def windows_mode(self) -> bool:
+        return (self.bc.get("scan_mode") or "windows") == "windows"
+
     def pause_s(self) -> float:
-        """Random pause between passes (500-5000 ms by default)."""
+        """Random pause before the next fetch: windows mode = the user's delay between items (1-600 s);
+        otherwise 500-5000 ms between passes."""
+        if self.windows_mode:
+            lo, hi = rotate_delay_range(self.cfg)
+            return random.uniform(lo, hi)
         return random_pause_s(self.cfg)
 
     def __init__(self, cfg, profile_dir: Optional[Path] = None):
@@ -345,6 +364,11 @@ class BrowserSource:
         self.match_info = ""
         self.forsale_info = ""
         self.should_stop: Optional[Callable[[], bool]] = None  # the poller says when Stop was pressed
+        self._sessions: dict = {}  # windows mode: item name (lower case) -> _Session
+        self._retry_at: dict = {}
+        self._turn = 0
+        self._spare = None  # the page the browser starts with, used for the first item
+        self._selected, self._used = False, ""
         self._force_visible = False  # set once the window was opened because something went wrong
         self.mode = ""  # "window", "background (off-screen window)" or "background (headless)"
         self._logged: set = set()
@@ -397,6 +421,8 @@ class BrowserSource:
         # can see; a headless browser is treated differently by many sites). Only without a screen is it truly
         # headless. If something goes wrong the window is opened on screen so you can look at it.
         args, headless = [], False
+        if self.windows_mode:
+            self._force_visible = True  # the item windows are taken in turns, so they are real, visible windows
         if self.background:
             if self._can_show():
                 args = ["--window-position=-32000,-32000", "--window-size=1500,900",
@@ -444,6 +470,7 @@ class BrowserSource:
             raise RuntimeError(f"Could not start the browser '{channel or 'chromium'}': {_short(e)}. "
                                "Pick another browser in Settings (msedge, chrome or chromium).")
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+        self._spare = self._page
         self._page.set_default_timeout(int(self.bc["page_timeout_ms"]))
 
     def close(self):
@@ -453,7 +480,8 @@ class BrowserSource:
                     getattr(obj, meth)()
             except Exception:
                 pass
-        self._pw = self._ctx = self._page = None
+        self._pw = self._ctx = self._page = self._spare = None
+        self._sessions.clear()
 
     # ---- navigation / challenge handling
     def _is_challenge(self, page, resp=None) -> bool:
@@ -912,12 +940,17 @@ class BrowserSource:
 
     def _monitor(self, page, name: str) -> tuple[list[Listing], str]:
         used = self._select_item(page, name)
+        self._selected, self._used = bool(used), used or ""
         if not used:
             if not self.last_candidates:
                 return [], "no item with exactly this name on the site"
             shown = "; ".join(self.last_panels[:3])
             return [], (f"none of the {len(self.last_panels)} search results opened this item "
                         f"(the right-hand panel showed: {shown})")
+        return self._scrape(page, name, used)
+
+    def _scrape(self, page, name: str, used: str) -> tuple[list[Listing], str]:
+        """The item is open in the right-hand panel: go to its For sale now list and read the shops."""
         typical = self._typical(page, used)
         forsale = self._open_forsale(page)
         self.forsale_info = forsale
@@ -935,6 +968,184 @@ class BrowserSource:
                   f"{si.get('steps', 0)} scroll step(s); stopped because {si.get('stop') or '?'})")
         return out, ("" if out else "no listings shown")
 
+    # ---- windows mode: one browser window per watched item, taken in turns
+    def _watch_names(self) -> list[str]:
+        seen, out = set(), []
+        for e in self.cfg["watchlist"]:
+            n = (e.get("name") or "").strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                out.append(n)
+        return out
+
+    def _new_window(self):
+        """A new browser window of the same profile (so the site's cookies are shared); a tab if that fails."""
+        ctx = self._ctx
+        if self.bc.get("each_item_in_window", True):
+            try:
+                anchor = next(p for p in ctx.pages if not p.is_closed())
+                cdp = ctx.new_cdp_session(anchor)
+                try:
+                    with ctx.expect_page(timeout=10000) as info:
+                        cdp.send("Target.createTarget", {"url": "about:blank", "newWindow": True})
+                    return info.value
+                finally:
+                    try:
+                        cdp.detach()
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._act(f"Could not open a separate window ({_short(e)}); using a tab instead")
+        return ctx.new_page()
+
+    def _release_page(self, page):
+        """Give a window back: closed, unless it is the browser's last one (then it is parked on a blank page)."""
+        try:
+            if page.is_closed():
+                return
+            if len([p for p in self._ctx.pages if not p.is_closed()]) > 1:
+                page.close()
+            else:
+                page.goto("about:blank")
+                self._spare = page
+        except Exception:
+            pass
+
+    def _reconcile(self, names: list[str]):
+        """Drop the windows of items that left the Watchlist or whose window was closed by hand."""
+        keep = {n.lower() for n in names}
+        for key, s in list(self._sessions.items()):
+            try:
+                closed = s.page.is_closed()
+            except Exception:
+                closed = True
+            if closed or key not in keep:
+                self._act(f"Window of '{s.name}' " + ("was closed" if closed else "is no longer on the Watchlist"))
+                del self._sessions[key]
+                if not closed:
+                    self._release_page(s.page)
+
+    def _fetch_step(self) -> list[Listing]:
+        """ONE step per call (the poller waits the random delay between steps): set up the next item that has no
+        window yet (open window, search, verify, For sale now tab, read), otherwise take the next window in turn,
+        click its item once on the left to refresh, and read the For sale now list."""
+        names = self._watch_names()
+        self.note = ""
+        if not names:
+            self.note = "watchlist is empty - add items to monitor"
+            for k in list(self._sessions):
+                self._release_page(self._sessions.pop(k).page)
+            return []
+        try:  # every window closed by hand = the browser is gone
+            if self._ctx is not None and not [p for p in self._ctx.pages if not p.is_closed()]:
+                self.close()
+        except Exception:
+            self.close()
+        self._open()
+        self._cycles += 1
+        self._reconcile(names)
+        now = time.time()
+        target = next((n for n in names if n.lower() not in self._sessions
+                       and self._retry_at.get(n.lower(), 0) <= now), None)
+        live = [n for n in names if n.lower() in self._sessions]
+        if target is None and not live:
+            self.note = "waiting to try the items that could not be opened again"
+            return []
+        total = len(names)
+        try:
+            if target is not None:
+                kind, name = "set up", target
+                ls, note = self._setup_session(name)
+            else:
+                kind, name = "refreshed", live[self._turn % len(live)]
+                self._turn += 1
+                ls, note = self._refresh_session(name)
+        except (ChallengeDetected, RateLimited):
+            raise
+        except Exception as e:
+            if kind == "set up":
+                self._retry_at[name.lower()] = time.time() + self.RETRY_NOT_FOUND_S
+            self._act(f"'{name}' failed ({_short(e)})")
+            raise
+        pos = names.index(name) + 1
+        self._act(f"Result for '{name}' ({kind}): {len(ls)} listing(s)" + (f" - {note}" if note else ""))
+        self.note = f"{name} [{pos}/{total}, {kind}]" + (f" - {note}" if note else "")
+        return ls
+
+    def _setup_session(self, name: str):
+        page = self._spare or self._new_window()
+        self._spare = None
+        self._act(f"Opening a window for '{name}'")
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        self._goto_start(page)
+        try:
+            self._filter_box(page).wait_for(state="visible")
+        except Exception:
+            self._release_page(page)
+            raise RuntimeError(f"Could not find the item filter box ('{self.bc['filter_placeholder']}') "
+                               "on the page. Check the start URL and the filter text in Settings.")
+        ls, note = self._monitor(page, name)
+        if self._selected:
+            self._sessions[name.lower()] = _Session(page, name, self._used)
+        else:
+            self._retry_at[name.lower()] = time.time() + self.RETRY_NOT_FOUND_S
+            self._release_page(page)
+        return ls, note
+
+    def _refresh_session(self, name: str):
+        s = self._sessions[name.lower()]
+        page = s.page
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        if self._is_challenge(page):
+            self._clear_challenge(page)
+        if self._reclick(page, name):
+            return self._scrape(page, name, s.used)
+        self._act(f"'{name}' is no longer on the left; searching for it again in the same window")
+        ls, note = self._monitor(page, name)
+        if self._selected:
+            s.used = self._used
+        else:
+            del self._sessions[name.lower()]
+            self._retry_at[name.lower()] = time.time() + self.RETRY_NOT_FOUND_S
+            self._release_page(page)
+        return ls, note
+
+    def _reclick(self, page, name: str) -> bool:
+        """Click the item in the result list on the left ONCE (the window never navigates away) and check that
+        the right-hand panel shows the same item (name and icon). False when it is not on the left any more."""
+        want = self._key(name)
+        sel = (self.bc.get("item_selector") or "").strip() or "button.item-select"
+        pool = page.locator(sel)
+        try:
+            titles = pool.evaluate_all("els => els.map(e => e.getAttribute('title') || e.innerText || '')")
+        except Exception:
+            return False
+        idx = next((i for i, t in enumerate(titles) if self._key(t) == want), None)
+        if idx is None:
+            return False
+        try:
+            row_ids = icon_ids(pool.nth(idx).evaluate(_RESULT_ICON_JS))
+        except Exception:
+            row_ids = []
+        self._act(f"Clicking '{name}' on the left once to refresh it")
+        pool.nth(idx).click()
+        self._delay(0.3)
+        t0 = time.time()
+        while True:
+            ok, shown = self._panel_matches(page, want, row_ids)
+            if ok:
+                return True
+            if time.time() - t0 > 4.0:
+                self._act(f"The panel showed '{shown}' after the click")
+                return False
+            time.sleep(0.3)
+
     # ---- poller interface
     def fetch(self) -> list[Listing]:
         try:
@@ -949,6 +1160,8 @@ class BrowserSource:
             raise
 
     def _fetch(self) -> list[Listing]:
+        if self.windows_mode:
+            return self._fetch_step()
         names = [e["name"] for e in self.cfg["watchlist"] if e.get("name")]
         self.note = ""
         if not names:

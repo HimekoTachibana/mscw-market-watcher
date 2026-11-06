@@ -32,7 +32,7 @@ from typing import Callable, Optional
 import requests
 
 APP_NAME = "MesoWatcher"
-VERSION = "0.5.8"
+VERSION = "0.5.9"
 FULL_NAME = "MSCW Market Watcher"  # used for packaged app / folder names
 MIN_INTERVAL_MS = 1000  # hard floor, regardless of settings
 MAX_BACKOFF_S = 600
@@ -68,6 +68,8 @@ DEFAULT_CONFIG = {
         "item_selector": "button.item-select",  # item buttons in the table (blank = match by visible text)
         "row_selector": "li.buy-row",  # one listing in the Newest list (blank = find rows by their "each" label)
         "newest_label": "Newest",
+        "scan_mode": "windows",  # "windows": one browser window per watched item, taken in turns; "single": one window, all items per pass
+        "each_item_in_window": True,  # windows mode: a window per item (False = a tab per item)
         "forsale_label": "For sale now",  # tab (top of the right-hand panel) that lists every shop selling the item
         "max_results_tried": 6,  # search results clicked one after the other to find the item before giving up
         "open_labels": ["Where to buy", "For sale now"],
@@ -75,6 +77,8 @@ DEFAULT_CONFIG = {
     "max_age_min": 0,  # extra cap on listing age in minutes (0 = none); lookback_min already limits it
     "feed_max_age_hours": 0,  # delete Live Feed listings older than this many hours (0 = use the look-back window)
     "feed_dismissed": {},  # {listing key: time.time()} of listings removed with "Clear Live Feed"; they stay gone
+    "rotate_delay_min_s": 5,   # windows mode: random delay between two items, 1..600 seconds
+    "rotate_delay_max_s": 20,
     "test_item": "Gloves Crit. Rate Scroll: Intermediate",  # Settings > Test uses this item
     "feed_items": [],  # Live Feed: only these items are shown (empty = every item)
     "only_with_location": False,  # Live Feed: show only listings that have BOTH a channel and a location
@@ -351,6 +355,21 @@ class Poller(threading.Thread):
 
 
 # ------------------------------------------------------------------ listing helpers
+ROTATE_MIN_S, ROTATE_MAX_S = 1.0, 600.0  # limits of the delay between two items in the rotating windows mode
+
+
+def rotate_delay_range(cfg: "Config") -> tuple[float, float]:
+    """(min, max) seconds of the random delay between items, forced into 1..600 and min <= max."""
+    def num(key, default):
+        try:
+            return float(cfg[key])
+        except (KeyError, TypeError, ValueError):
+            return default
+    lo = min(max(num("rotate_delay_min_s", 5.0), ROTATE_MIN_S), ROTATE_MAX_S)
+    hi = min(max(num("rotate_delay_max_s", 20.0), lo), ROTATE_MAX_S)
+    return lo, hi
+
+
 def random_pause_s(cfg: "Config") -> float:
     """A random wait between delay_min_ms and delay_max_ms (floor 500 ms), like a person clicking around."""
     lo = max(int(cfg["delay_min_ms"]), 500)

@@ -313,7 +313,9 @@ class App(tk.Tk):
         self.btn.pack(side="left")
         self.pause_btn = ttk.Button(top, text="Pause", command=self.toggle_pause, state="disabled")
         self.pause_btn.pack(side="left", padx=(6, 0))
-        ttk.Label(top, foreground="#555", text="Pauses: configured polling interval").pack(side="left", padx=(12, 2))
+        self.delay_lbl = ttk.Label(top, foreground="#555")
+        self.delay_lbl.pack(side="left", padx=(12, 2))
+        self._delay_label()
         self.show_all = tk.BooleanVar(value=self.cfg["show_all"])
         ttk.Checkbutton(top, text="Show all listings", variable=self.show_all,
                         command=self._render).pack(side="left", padx=12)
@@ -852,6 +854,13 @@ class App(tk.Tk):
         self.btn.config(text="Stop")
         self.pause_btn.config(text="Pause", state="normal")
 
+    def _delay_label(self):
+        if self.cfg["browser"].get("scan_mode", "windows") == "windows":
+            lo, hi = core.rotate_delay_range(self.cfg)
+            self.delay_lbl.config(text=f"Next item every {lo:g}-{hi:g} s")
+        else:
+            self.delay_lbl.config(text="Pauses: configured polling interval")
+
     def toggle_pause(self):
         """Pause after the current scan, or resume the existing poller."""
         if not self.poller or not self.poller.is_alive():
@@ -1040,6 +1049,19 @@ class App(tk.Tk):
         ttk.Checkbutton(f1, text="Show the browser window while working (off = runs in the background; it opens by itself "
                              "when something goes wrong or a check needs you)",
                         variable=show_win).pack(anchor="w", pady=(8, 0))
+        ttk.Label(f1, text="How the watched items are scanned").pack(anchor="w", pady=(8, 0))
+        mode_var = tk.StringVar(value=bc.get("scan_mode", "windows"))
+        ttk.Radiobutton(f1, variable=mode_var, value="windows", text="Rotating windows: every watched item keeps its own "
+                        "browser window open and the windows are taken in turns (recommended)").pack(anchor="w")
+        ttk.Radiobutton(f1, variable=mode_var, value="single", text="One window: all items are searched one after "
+                        "the other in a single pass").pack(anchor="w")
+        each_win = tk.BooleanVar(value=bc.get("each_item_in_window", True))
+        ttk.Checkbutton(f1, variable=each_win, text="Rotating windows: open each item in a separate window "
+                        "(off = a tab for each item)").pack(anchor="w")
+        g_rmin = field(f1, "Rotating windows: random delay between items - shortest (seconds, 1 to 600)",
+                       self.cfg["rotate_delay_min_s"], width=10)
+        g_rmax = field(f1, "Rotating windows: random delay between items - longest (seconds, up to 600)",
+                       self.cfg["rotate_delay_max_s"], width=10)
         g_dmin = field(f1, "Random pause between actions - shortest (ms, minimum 500)", self.cfg["delay_min_ms"], width=10)
         g_dmax = field(f1, "Random pause between actions - longest (ms)", self.cfg["delay_max_ms"], width=10)
         ttk.Label(f1, foreground="#555", text="How far back to look is set in the main window (Watchlist > "
@@ -1099,6 +1121,10 @@ class App(tk.Tk):
                 dmax = max(int(g_dmax()), dmin)
                 mx = max(int(g_max()), 1)
                 tries = max(int(g_tries()), 1)
+                rmin, rmax = float(g_rmin()), float(g_rmax())
+                if not (core.ROTATE_MIN_S <= rmin <= rmax <= core.ROTATE_MAX_S):
+                    raise ValueError("Delay between items: shortest must be at least 1 s, longest at most 600 s, "
+                                     "and the shortest cannot be longer than the longest")
                 keep_h = float(g_keep().strip() or 0)
                 if keep_h < 0:
                     raise ValueError("Delete listings older than: enter hours, 0 or more")
@@ -1110,7 +1136,10 @@ class App(tk.Tk):
                 return False
             bc.update(extra)
             bc.update(start_url=g_start().strip(), channel=g_chan.get(), headless=not show_win.get(),
-                      listing_cap=mx, max_results_tried=tries)
+                      listing_cap=mx, max_results_tried=tries, scan_mode=mode_var.get(),
+                      each_item_in_window=each_win.get())
+            self.cfg["rotate_delay_min_s"], self.cfg["rotate_delay_max_s"] = rmin, rmax
+            self._delay_label()
             self.cfg["delay_min_ms"], self.cfg["delay_max_ms"] = dmin, dmax
             self.cfg["osms_base"] = g_osms().strip()
             self.cfg["meowdb_url"] = g_meow().strip()

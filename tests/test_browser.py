@@ -2,6 +2,7 @@
 left item list with a filter box, right panel with 'Where to buy' -> Newest/Cheapest rows."""
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -189,7 +190,7 @@ function table(){
    `<tr><td><div class="item-cell"><div class="item-icon"><img src="data/icons/${it.icon}.png" alt=""></div>
     <div class="item-text"><button class="item-name item-select" data-i="${i}" title="${it.title}">Shoes Speed Scroll</button></div></div></td>
     <td data-col="price"><span class="meso" title="140,000 mesos">140K</span></td></tr>`).join('');
-  document.querySelectorAll('button.item-select').forEach(b=>b.onclick=()=>{cur=ITEMS[+b.dataset.i];tab='info';draw();});
+  document.querySelectorAll('button.item-select').forEach(b=>b.onclick=()=>{window.__clicks=(window.__clicks||0)+1;cur=ITEMS[+b.dataset.i];tab='info';draw();});
 }
 const li = r => `<li class="buy-row fsn-row up can-open"><div class="buy-main"><div class="buy-seller">${r.s}</div>
   <div class="buy-meta"><span class="buy-where tag-map" title="Free Market ${r.fm}">FM${r.fm}</span><span class="ch-chip tag-ch">CH ${r.ch}</span>
@@ -262,7 +263,7 @@ def src(tmp_path, site):
     cfg = core.Config(tmp_path / "c.json")
     cfg["delay_min_ms"] = cfg["delay_max_ms"] = 500  # keep tests fast (production: random 500-5000)
     cfg["browser"].update(start_url=site + "/", channel="chromium", headless=True,
-                          page_timeout_ms=20000, challenge_wait_s=2)
+                          page_timeout_ms=20000, challenge_wait_s=2, scan_mode="single")
     s = browser.BrowserSource(cfg, profile_dir=tmp_path / "profile")
     try:
         s._open()
@@ -730,3 +731,91 @@ def test_closing_the_window_is_not_a_completed_check(src):
         src._clear_challenge(ClosedPage(), Resp())
     assert "closed before the Cloudflare check was completed" in str(e.value)
     assert not any(ln.endswith("] The Cloudflare check was completed") for ln in errorlog.trail())
+
+
+# ---- windows mode: one browser window per watched item, taken in turns
+@pytest.fixture()
+def win(src, site):
+    """The same browser, in windows mode (needs a screen: the item windows are real windows)."""
+    src.close()
+    src.cfg["browser"].update(start_url=site + "/fsn?decoys=1", headless=False, scan_mode="windows")
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Decoy 0", "max_price": None},
+                            {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    return src
+
+
+def test_delay_between_items_is_the_users_range_clamped_to_1_600(src):
+    src.cfg["browser"]["scan_mode"] = "windows"
+    for lo, hi, want in ((3, 9, (3, 9)), (0, 5000, (1, 600)), (50, 10, (50, 50)), ("x", None, (5, 20))):
+        src.cfg["rotate_delay_min_s"], src.cfg["rotate_delay_max_s"] = lo, hi
+        assert core.rotate_delay_range(src.cfg) == (float(want[0]), float(want[1]))
+        assert all(want[0] <= src.pause_s() <= want[1] for _ in range(20))
+    src.cfg["browser"]["scan_mode"] = "single"
+    assert src.pause_s() <= 5.0  # the old behaviour: 0.5-5 s between passes
+
+
+@needs_screen
+def test_windows_mode_sets_items_up_one_window_each_then_refreshes_by_one_click(win):
+    a = win.fetch()  # step 1: window for the first item, searched, verified, For sale now tab, read
+    assert len(a) == 60 and {l.item_name for l in a} == {"Shoes Speed Scroll: Decoy 0"}
+    assert list(win._sessions) == ["shoes speed scroll: decoy 0"] and "set up" in win.note
+    b = win.fetch()  # step 2: the second item gets a window of its own
+    assert len(b) == 60 and {l.item_name for l in b} == {"Shoes Speed Scroll: Chaos"}
+    s1, s2 = win._sessions.values()
+    assert s1.page is not s2.page and len([p for p in win._ctx.pages if not p.is_closed()]) == 2
+    s1.page.evaluate("window.__keep = 1; window.__clicks = 0")
+    s2.page.evaluate("window.__keep = 1; window.__clicks = 0")
+    c = win.fetch()  # step 3: back to the first window; its item is clicked ONCE, nothing is reloaded
+    assert {l.item_name for l in c} == {"Shoes Speed Scroll: Decoy 0"} and len(c) == 60 and "refreshed" in win.note
+    assert s1.page.evaluate("[window.__keep, window.__clicks]") == [1, 1]
+    assert s2.page.evaluate("[window.__keep, window.__clicks]") == [1, 0]  # the other window was not touched
+    d = win.fetch()
+    assert {l.item_name for l in d} == {"Shoes Speed Scroll: Chaos"} and s2.page.evaluate("window.__clicks") == 1
+    assert s2.page.evaluate("window.__keep") == 1  # never navigated away
+    assert [p.url for p in (s1.page, s2.page)] == [win.bc["start_url"]] * 2
+
+
+@needs_screen
+def test_windows_mode_item_that_cannot_be_found_does_not_block_the_others(win):
+    win.cfg["watchlist"] = [{"name": "No Such Item", "max_price": None}, {"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    first = win.fetch()
+    assert first == [] and "none of the" in win.note and "opened this item" in win.note
+    assert len(win.fetch()) == 60  # the next step is the other item, not another try of the missing one
+    assert list(win._sessions) == ["shoes speed scroll: chaos"]
+
+
+@needs_screen
+def test_windows_mode_closed_window_is_opened_again_and_removed_items_lose_their_window(win):
+    win.fetch(); win.fetch()
+    first = next(iter(win._sessions.values())).page
+    first.close()  # the user closed one window
+    win.fetch()
+    assert len(win._sessions) == 2 and all(not s.page.is_closed() for s in win._sessions.values())
+    win.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    win.fetch()
+    assert list(win._sessions) == ["shoes speed scroll: chaos"]
+    assert len([p for p in win._ctx.pages if not p.is_closed()]) == 1
+
+
+@needs_screen
+def test_windows_mode_works_with_the_poller_and_pause(win):
+    got, status = [], []
+    win.cfg["rotate_delay_min_s"] = win.cfg["rotate_delay_max_s"] = 1
+    poller = core.Poller(win, win.cfg, got.extend, status.append)
+    poller.start()
+    t0 = time.time()
+    while len(got) < 120 and time.time() - t0 < 60:
+        time.sleep(0.5)
+    assert len(got) >= 120  # both items were read, one step each, about 1 s apart
+    poller.pause()
+    time.sleep(2.5)
+    n = len(got)
+    time.sleep(3)
+    assert len(got) == n  # paused: no new step
+    poller.resume()
+    t1 = time.time()
+    while len(got) == n and time.time() - t1 < 20:
+        time.sleep(0.5)
+    assert len(got) > n
+    poller.stop()
+    poller.join(15)

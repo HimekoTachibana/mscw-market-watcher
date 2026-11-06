@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.9 - 2026-11-05
+- **Rotating windows (new default way of scanning).** Every watched item now gets its own real browser window
+  (no headless browser). The program opens a window for an item, searches it, checks the right item is
+  selected (name and icon), opens the **For sale now** tab, reads the shops, and then **leaves that window as it
+  is, never navigating away**. After a random delay it moves on to the next item (opening its window the first
+  time). Once every item has a window, the windows are taken in turns: the program brings the next window to the
+  front, **clicks its item once on the left** to refresh the For sale now list, reads the shops, waits the random
+  delay and goes on to the next window. Because each step is one item, the Live Feed fills item by item.
+- **Delay between items:** Settings > General > "Rotating windows: random delay between items" - shortest and
+  longest in seconds, anywhere from **1 to 600**. The main window shows "Next item every X-Y s".
+  (The small random pauses between clicks inside one item still use the millisecond settings.)
+- Settings > General: choose **Rotating windows** or the previous **One window** way of scanning, and whether each
+  item gets a separate window or a tab. The windows share one browser profile, so a Cloudflare check only needs
+  completing once.
+- A window you close is opened again on its turn; an item that cannot be opened (not found) is skipped and tried
+  again after 5 minutes without holding up the others; items removed from the Watchlist lose their window.
+  Closing all windows is treated as the browser being gone and it starts again.
+- **Pause / Resume** (added in v0.5.8) works with this: pressing Pause waits for the step being read and then holds
+  all windows open; Resume carries on with the next window; Stop closes everything.
+- Tests: one window per item, the single click refresh without a reload, the delay range limits, closed windows,
+  removed items and Pause with the poller.
+
 ## v0.5.8 - 2026-11-05
 - Added a **Pause / Resume** button beside **Start**. Pause requests the poller to finish its current scan before waiting; Resume continues the existing polling session without restarting the browser. **Stop** remains available to end monitoring and close the browser.
 - Pause also takes effect during the idle interval between scans, and the wait can be resumed or stopped without waiting for the full interval.
