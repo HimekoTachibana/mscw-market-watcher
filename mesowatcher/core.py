@@ -278,6 +278,7 @@ class Poller(threading.Thread):
         self.source, self.cfg = source, cfg
         self.on_listings, self.on_status = on_listings, on_status
         self._halt = threading.Event()  # not "_stop": Thread uses that name internally
+        self._pause = threading.Event()
         self._backoff = 0.0
         if hasattr(source, "on_status"):
             source.on_status = on_status  # lets a browser source say "waiting for you..."
@@ -286,6 +287,22 @@ class Poller(threading.Thread):
 
     def stop(self):
         self._halt.set()
+        self._pause.clear()
+
+    def pause(self):
+        """Request a pause after the current fetch pass finishes."""
+        self._pause.set()
+
+    def resume(self):
+        self._pause.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause.is_set()
+
+    def _wait_while_paused(self):
+        while self._pause.is_set() and not self._halt.is_set():
+            self._halt.wait(0.2)
 
     def run(self):
         try:
@@ -298,7 +315,10 @@ class Poller(threading.Thread):
     def _loop(self):
         floor = getattr(self.source, "min_interval_ms", MIN_INTERVAL_MS)
         while not self._halt.is_set():
-            pause = getattr(self.source, "pause_s", None)  # browser source: random 0.5-5 s like a person
+            self._wait_while_paused()
+            if self._halt.is_set():
+                break
+            pause = getattr(self.source, "pause_s", None)
             wait = pause() if pause else max(self.cfg["interval_ms"], floor) / 1000.0
             try:
                 listings = self.source.fetch()
@@ -318,7 +338,16 @@ class Poller(threading.Thread):
                 self._backoff = min(max(self._backoff * 2, 10.0), MAX_BACKOFF_S)
                 wait = self._backoff
                 self.on_status(f"Error: {e} (retry in {wait:.0f}s)")
-            self._halt.wait(wait)
+            # Keep the pause responsive during the idle interval. A pause requested
+            # during fetch() takes effect after that complete fetch pass.
+            remaining = max(float(wait), 0.0)
+            while remaining > 0 and not self._halt.is_set():
+                self._wait_while_paused()
+                if self._halt.is_set():
+                    break
+                started = time.monotonic()
+                self._halt.wait(min(remaining, 0.2))
+                remaining -= min(remaining, time.monotonic() - started)
 
 
 # ------------------------------------------------------------------ listing helpers
