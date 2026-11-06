@@ -22,24 +22,36 @@ Lighter on meso.watch: fewer requests, and the program now notices when the site
   1 minute instead of 10 s); the browser is not closed, reopened and pointed at the site again. A window is still
   opened for checks, refused requests and a failed Settings test.
 - The page is reloaded at most every 2 hours (was every 10 passes).
-- **Settings saved by older versions are updated once** to headless + one page, and a delay between items shorter
-  than 20-40 s is raised. You can change them back in Settings.
+- **Your saved settings are kept.** The new defaults (one page, headless, 3-5 min between passes) apply to fresh
+  installs; an existing install keeps its scan mode and its "Show the browser window" choice. The hard floors
+  (each item at most once a minute, at least 10 s between items, 60 s between passes) and the rate-limit handling
+  apply to everyone. The rotating mode now honors "Show the browser window" too: it runs headless unless that is
+  ticked. **Watch only** still needs the rotating mode (Settings > Scan mode > Rotating windows).
+- A `Retry-After` is capped at 1 hour (the status line says when the site asked for more), an old 429 counts only
+  for the rest of its wait, and a step that did not contact the site no longer ends a backoff.
+- After a Cloudflare check is completed in the window that opened for it, the rest of that session stays in the
+  window (Cloudflare's clearance belongs to that browser); the next Start runs headless again.
 - **Portable downloads, nothing to install.** The Linux and macOS downloads now carry their own Chromium (no
   `playwright install`, no Chrome needed); Windows keeps using the Edge that comes with Windows.
 - **One Linux download for every distribution.** It is now built on Debian 11 (glibc 2.31) instead of the newest
   Ubuntu, so it starts on Ubuntu 20.04+, Debian 11+, Fedora, RHEL 9, openSUSE, Arch, CachyOS, Bazzite and SteamOS.
-  The release build starts the finished download on Ubuntu 22.04, Debian 12, Fedora, openSUSE Tumbleweed, Arch,
-  CachyOS, SteamOS (Holo) and Bazzite before publishing.
-- If a minimal Linux install lacks a library Chromium needs (NSS, CUPS, ATK, AT-SPI, xkbcommon, a few X
-  extensions), the program uses its own copy of **only that library**, for the browser only. Libraries tied to the
+  The release build starts the finished download on Ubuntu 22.04, Debian 12, Fedora, openSUSE Tumbleweed and Arch
+  before publishing (a failure there blocks the release), and on CachyOS, SteamOS (Holo) and Bazzite as
+  informational checks that never block it.
+- If a minimal Linux install lacks a library Chromium needs (NSS and the SQLite it uses, CUPS, ATK, AT-SPI,
+  xkbcommon, a few X extensions), the program uses its own copy of **only that library**, for the browser only,
+  from a folder of its own for each running copy of the program. Libraries tied to the
   graphics driver or sound system are never replaced.
 - Where the system blocks Chromium's sandbox (Ubuntu 24.04+'s AppArmor rule), the browser is started once more
   without it instead of failing.
 - Sound on Linux also works with PipeWire's `pw-play` (Fedora, Bazzite, SteamOS, CachyOS) and `ffplay`.
 - No distribution-specific instructions (`apt install ...`) remain in the build script or README.
+  `build_linux.sh` and `build_macos.sh` are now marked executable in git.
 - Tests: rate limit seen on a background request (with Retry-After), other sites' 429s ignored, Cloudflare check
   pages not counted as rate limits, the cool-down, the per-item floor, the pause between passes, no browser restart
-  after an error, headless mode and the one-time settings update.
+  after an error, headless mode, saved settings kept, the Retry-After cap, old 429s, steps that did not contact
+  the site, headless -> check -> window -> completed -> scan goes on, and every rotating-mode test both with real
+  windows and headless.
 
 ## v0.5.9 - 2026-11-05
 - **Rotating windows (new default way of scanning).** Every watched item now gets its own real browser window

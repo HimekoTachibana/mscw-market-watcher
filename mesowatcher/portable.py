@@ -109,6 +109,26 @@ def missing_libs(exe: str, extra_path: str = "", also: tuple = ()) -> list[str]:
     return sorted(set(_NOT_FOUND_RE.findall(out)))
 
 
+def libs_work_dir(base: Path) -> Path:
+    """A folder of its own for this running program (two copies sharing a settings folder must not delete each
+    other's links). Folders left by programs that are no longer running are removed."""
+    base.mkdir(parents=True, exist_ok=True)
+    for d in base.iterdir():
+        if d.is_dir() and d.name.isdigit() and int(d.name) != os.getpid() and not _alive(int(d.name)):
+            shutil.rmtree(d, ignore_errors=True)
+    return base / str(os.getpid())
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # exists, but belongs to someone else
+        return True
+    return True
+
+
 def browser_env(exe: str, work_dir: Path) -> tuple[Optional[dict], list[str]]:
     """(environment for the browser or None when nothing is needed, libraries still missing afterwards).
 

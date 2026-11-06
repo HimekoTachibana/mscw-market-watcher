@@ -99,12 +99,16 @@ jobs:
 
       - name: System packages (build machine only; the finished program needs none of them)
         run: |
-          # Debian 11 support has ended, so its packages are served from the archive now
+          # DELIBERATE: Debian 11 is end-of-life. It is used only as the BUILD machine, because its old glibc (2.31)
+          # is what makes one download run on every current distribution; nothing from it runs on its own. Its
+          # packages now live on archive.debian.org (over HTTPS; apt still checks their signatures). The archive's
+          # Release files no longer get new dates, hence Check-Valid-Until=false. Move to the next old-enough base
+          # (or a manylinux-style image) if this archive ever goes away.
           rm -f /etc/apt/sources.list.d/*
           printf '%s\n' \
-            'deb http://archive.debian.org/debian bullseye main' \
-            'deb http://archive.debian.org/debian bullseye-updates main' \
-            'deb http://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
+            'deb https://archive.debian.org/debian bullseye main' \
+            'deb https://archive.debian.org/debian bullseye-updates main' \
+            'deb https://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
           apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends binutils xvfb xauth alsa-utils fonts-liberation \
             libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 \
@@ -161,8 +165,14 @@ jobs:
   # Start the finished Linux download on other distributions: the window (under a virtual screen) and its own
   # Chromium. Each image gets only what a normal desktop install already has (GTK, Mesa, sound library, X), never
   # Python, Tk or a browser.
+  # Official images (Ubuntu, Debian, Fedora, openSUSE, Arch) block a release if the download fails there.
+  # Third-party images (CachyOS, SteamOS Holo, Bazzite) are informational: a failed or flaky registry pull shows as
+  # a failed check but never blocks a release. Images are not pinned on purpose: these jobs exist to try the
+  # download on the CURRENT release of each distribution. They only unpack and start the download, with a
+  # read-only token, so a changed image cannot reach anything.
   linux-compat:
     needs: build-linux
+    continue-on-error: ${{ matrix.optional }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -170,24 +180,31 @@ jobs:
         include:
           - distro: Ubuntu 22.04
             image: ubuntu:22.04
+            optional: false
             prep: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-3-0 libgbm1 libasound2 xvfb tar gzip
           - distro: Debian 12
             image: debian:12
+            optional: false
             prep: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libgbm1 libasound2 xvfb tar gzip
           - distro: Fedora
             image: fedora:latest
+            optional: false
             prep: dnf install -y gtk3 mesa-libgbm alsa-lib xorg-x11-server-Xvfb tar gzip findutils
           - distro: openSUSE Tumbleweed
             image: opensuse/tumbleweed:latest
+            optional: false
             prep: zypper -n install libgtk-3-0 libgbm1 libasound2 xorg-x11-server-Xvfb dejavu-fonts tar gzip findutils
           - distro: Arch Linux
             image: archlinux:latest
+            optional: false
             prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
           - distro: CachyOS
             image: cachyos/cachyos:latest
+            optional: true
             prep: pacman -Syu --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
           - distro: SteamOS (Holo base)
             image: ghcr.io/steamdeckhomebrew/holo-base:latest
+            optional: true
             prep: pacman -Sy --noconfirm gtk3 mesa alsa-lib xorg-server-xvfb tar gzip findutils
     container: ${{ matrix.image }}
     name: Linux on ${{ matrix.distro }}
@@ -239,6 +256,7 @@ jobs:
   # It is a complete desktop system: nothing is added to it, and the browser part runs headless.
   linux-bazzite:
     needs: build-linux
+    continue-on-error: true  # informational, see linux-compat; not needed by the release
     runs-on: ubuntu-latest
     name: Linux on Bazzite
     steps:
@@ -265,7 +283,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
-    needs: [build, build-linux, linux-compat, linux-bazzite]
+    needs: [build, build-linux, linux-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write

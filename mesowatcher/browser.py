@@ -405,6 +405,8 @@ class BrowserSource:
         """Windows mode: seconds until the next item may be read again (0 when one is due or needs setting up)."""
         names = [n.lower() for n in self._watch_names()]
         if any(n not in self._sessions for n in names):
+            # an item still needs its page (or waits to be tried again): step again after the normal delay. Such a
+            # step contacts the site only when an item is actually set up, and that obeys the delay between items.
             return 0.0
         floor, now = item_revisit_s(self.cfg), time.time()
         due = [s.last_read + floor - now for k, s in self._sessions.items() if k in names]
@@ -432,7 +434,9 @@ class BrowserSource:
         self._logged: set = set()
         self._host = ""  # the site's host name: only its responses count for rate limiting
         self._limited: Optional[float] = None  # set by the response listener: seconds the site asked us to wait
+        self._limited_at = 0.0  # ... and when that answer came (pages refresh by themselves, maybe minutes ago)
         self._limited_what = ""
+        self.touched_site = True  # did the last fetch() make the browser contact the site? (see core.Poller)
         self._cooldown_until = 0.0  # no reads before this time (after a Cloudflare check)
         self._pass_started = 0.0  # one-window mode: when the last pass began
         self._loaded_at = 0.0  # one-window mode: when the start page was last loaded
@@ -473,15 +477,22 @@ class BrowserSource:
             if headers.get("cf-mitigated", "").lower() == "challenge":
                 return
             wait = parse_retry_after(headers.get("retry-after"))
-            self._limited = max(self._limited or 0.0, wait)
+            now = time.time()
+            if self._limited is None or now + wait > self._limited_at + self._limited:  # keep the later end
+                self._limited, self._limited_at = wait, now
             self._limited_what = f"HTTP {resp.status} for {urlparse(resp.url).path or '/'}"
         except Exception:
             pass
 
     def _check_limited(self):
         if self._limited:
-            wait, what = self._limited, self._limited_what
+            # the answer may be old (a page's own refresh, minutes before this step): only the rest of the wait counts
+            wait = self._limited - (time.time() - self._limited_at)
+            what = self._limited_what
             self._limited, self._limited_what = None, ""
+            if wait <= 0:
+                self._act(f"The site had asked us to slow down ({what}); that wait is already over")
+                return
             self._act(f"The site asked us to slow down ({what}); stopping this step and waiting {fmt_wait(wait)}")
             raise RateLimited(wait)
 
@@ -575,11 +586,12 @@ class BrowserSource:
             return
         if not exe or not os.path.exists(exe):
             return
-        env, still = portable.browser_env(exe, data_dir() / "browser-libs-active")
+        work = portable.libs_work_dir(data_dir() / "browser-libs-active")
+        env, still = portable.browser_env(exe, work)
         if env is not None:
             kw["env"] = env
             self._act("Using the program's own copies of libraries this computer does not have: "
-                      + ", ".join(sorted(p.name for p in (data_dir() / "browser-libs-active").iterdir())))
+                      + ", ".join(sorted(p.name for p in work.iterdir())))
         if still:
             self._act("Chromium may not start: this computer lacks " + ", ".join(still))
 
@@ -666,6 +678,9 @@ class BrowserSource:
             return None
         self._act(f"Opening the browser window for you ({reason})")
         self.close()
+        # From here on this session stays in the visible window, also after the check was completed: Cloudflare's
+        # clearance is tied to the browser it was given to, and a headless browser would just be checked again.
+        # The next Start (or restart of the program) runs headless again.
         self._force_visible = True
         try:
             self._open()
@@ -1190,6 +1205,7 @@ class BrowserSource:
         try:
             if target is not None:
                 kind, name = "set up", target
+                self.touched_site = True
                 ls, note = self._setup_session(name)
             elif not due:
                 self.note = (f"every item was read in the last {fmt_wait(floor)}; "
@@ -1200,6 +1216,7 @@ class BrowserSource:
                 order = live[self._turn % len(live):] + live[:self._turn % len(live)]
                 name = next(n for n in order if n in due)  # the next window in turn that is due
                 self._turn = live.index(name) + 1
+                self.touched_site = True
                 ls, note = self._refresh_session(name)
         except (ChallengeDetected, RateLimited):
             raise
@@ -1298,6 +1315,7 @@ class BrowserSource:
                 now = time.time()
                 if stale_s and now - max(s.last_change, s.last_read) > stale_s:
                     self._act(f"'{name}': no change for {stale_s / 60:g} min - refreshing it once with a click")
+                    self.touched_site = True
                     ls, _note = self._refresh_session(name)
                     out += ls
                     refreshed.append(name)
@@ -1371,6 +1389,7 @@ class BrowserSource:
 
     # ---- poller interface
     def fetch(self) -> list[Listing]:
+        self.touched_site = False  # set by every step below that loads, types or clicks on the site
         try:
             return self._fetch()
         except RateLimited:
@@ -1393,6 +1412,7 @@ class BrowserSource:
             return []
         self._open()
         page = self._page
+        self.touched_site = True
         self._cycles += 1
         self._pass_started = time.time()
         self._ensure_loaded(page)

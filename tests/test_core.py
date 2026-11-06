@@ -258,17 +258,67 @@ def test_rate_limit_backoff_honors_retry_after_and_grows(cfg):
     assert p._backoff >= core.ERROR_BACKOFF_MIN_S  # never retried after only 5 s
 
 
-def test_old_settings_are_moved_to_headless_and_one_page_once(tmp_path):
+def test_saved_settings_are_kept_and_only_fresh_installs_get_the_new_defaults(tmp_path):
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"browser": {"headless": False, "scan_mode": "windows"},
-                                "rotate_delay_min_s": 1, "rotate_delay_max_s": 3}))
+                                "rotate_delay_min_s": 5, "rotate_delay_max_s": 20}))
     c = core.Config(path)
-    assert c["browser"]["headless"] is True and c["browser"]["scan_mode"] == "single"
-    assert (c["rotate_delay_min_s"], c["rotate_delay_max_s"]) == (20, 40)
-    assert c["config_version"] == core.CONFIG_VERSION
-    c["browser"]["scan_mode"] = "windows"  # the user chooses windows again afterwards: kept
-    c.save()
-    assert core.Config(path)["browser"]["scan_mode"] == "windows"
+    assert c["browser"]["headless"] is False and c["browser"]["scan_mode"] == "windows"  # the user's choices
+    assert core.rotate_delay_range(c) == (10.0, 20.0)  # ... but the hard floor still applies
+    assert c["pass_delay_min_s"] == 180  # a setting the old version did not have gets the new default
+    fresh = core.Config(tmp_path / "new.json")
+    assert fresh["browser"]["headless"] is True and fresh["browser"]["scan_mode"] == "single"
+
+
+def _run_poller(cfg, source, seconds=0.3):
+    msgs = []
+    p = core.Poller(source, cfg, lambda ls: None, msgs.append)
+    p.start()
+    time.sleep(seconds)
+    p.stop()
+    p.join(timeout=2)
+    return p, msgs
+
+
+def test_a_huge_retry_after_is_capped_and_explained(cfg):
+    class Source:
+        pause_s = staticmethod(lambda: 0.01)
+
+        def fetch(self):
+            raise core.RateLimited(10 * 24 * 3600)  # "come back in 10 days"
+
+        def close(self):
+            pass
+    p, msgs = _run_poller(cfg, Source())
+    assert "waiting 60 min" in msgs[0] and "the site asked for 14400 min, capped at 60 min" in msgs[0]
+
+
+def test_a_step_that_did_not_contact_the_site_keeps_the_backoff(cfg):
+    class Source:
+        pause_s = staticmethod(lambda: 0.01)
+        touched_site = False
+
+        def fetch(self):
+            return []
+
+        def close(self):
+            pass
+    src = Source()
+    p = core.Poller(src, cfg, lambda ls: None, lambda m: None)
+    p._backoff = 240.0
+    p.start()
+    time.sleep(0.2)
+    p.stop()
+    p.join(timeout=2)
+    assert p._backoff == 240.0  # a later 429 still doubles from here
+    src.touched_site = True
+    p2 = core.Poller(src, cfg, lambda ls: None, lambda m: None)
+    p2._backoff = 240.0
+    p2.start()
+    time.sleep(0.2)
+    p2.stop()
+    p2.join(timeout=2)
+    assert p2._backoff == 0.0
 
 
 def test_item_revisit_floor(cfg):

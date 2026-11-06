@@ -18,7 +18,10 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
   are older than the chosen window and the Listed time counts up every minute.
 * **Background:** the browser runs headless (no window). It never uses your mouse, keyboard or focus,
   so you can keep playing. Only if you tick "Show the browser window" (to pass a Cloudflare check
-  yourself) does a window open.
+  yourself) does a window open. If a Cloudflare check appears, a window opens by itself so you can
+  complete it; that session then stays in the window.
+* **Watch only** (Settings > General) needs **Scan mode: Rotating windows**: each item keeps its own page
+  and is read only when its list changed. One page (the default) is lighter on the site.
 
 ## Download and run (nothing to install)
 
@@ -131,6 +134,13 @@ program inside it). The version comes from `VERSION` in `mesowatcher/core.py`.
   release (or download them from the run's Artifacts). You can also start it by hand under Actions -> Build
   -> Run workflow: tick **Publish a release** to create the tag `v<VERSION>` and the release from the
   selected branch without using git on your computer, or leave it unticked to only get Artifacts.
+
+### Keeping the shipped Chromium up to date
+
+The Linux and macOS downloads carry the Chromium of the Playwright version they were built with, and it never
+updates by itself (the program only ever opens meso.watch with it). `requirements.txt` asks for the newest
+Playwright, so every release build picks up the current Chromium: publish a release at least once a month, and
+sooner when Playwright ships a Chromium security fix. Windows uses the system's Edge, which Windows keeps updated.
 
 ## Updating the program
 

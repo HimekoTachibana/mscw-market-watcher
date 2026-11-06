@@ -42,7 +42,8 @@ ERROR_BACKOFF_MIN_S = 60.0  # first wait after an error (doubles each time, up t
 RATE_LIMIT_DEFAULT_S = 120.0  # wait after a 429/503 that gave no usable Retry-After
 ITEM_REVISIT_FLOOR_S = 60.0  # no watched item is read more often than this, whatever the settings
 PASS_DELAY_FLOOR_S = 60.0  # one-window mode: shortest pause between two passes
-CONFIG_VERSION = 2  # bumped when saved settings need a one-time update on load (see Config.load)
+CONFIG_VERSION = 2  # recorded in saved settings. Saved choices are never changed on load: new defaults apply to
+# fresh installs, and the hard floors above (and the rate-limit handling) apply to everyone.
 
 
 def data_dir() -> Path:
@@ -144,24 +145,9 @@ class Config:
                         self.data[k].update(v)
                     else:
                         self.data[k] = v
-                if int(saved.get("config_version") or 1) < 2:
-                    self._upgrade_to_v2()
             except (OSError, ValueError, TypeError):
                 pass
 
-    def _upgrade_to_v2(self):
-        """v0.6.0: lighter on the site. Settings saved by older versions are moved once to a headless browser
-        and the one-page scan, and the delay between items is raised to the new defaults if it was shorter.
-        Everything can be changed back in Settings afterwards."""
-        bc = self.data["browser"]
-        bc["headless"] = True
-        bc["scan_mode"] = "single"
-        for k in ("rotate_delay_min_s", "rotate_delay_max_s"):
-            try:
-                self.data[k] = max(float(self.data.get(k) or 0), float(DEFAULT_CONFIG[k]))
-            except (TypeError, ValueError):
-                self.data[k] = DEFAULT_CONFIG[k]
-        self.data["config_version"] = CONFIG_VERSION
 
     def save(self):
         self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
@@ -357,8 +343,11 @@ class Poller(threading.Thread):
             pause = getattr(self.source, "pause_s", None)
             try:
                 listings = self.source.fetch()
-                self._backoff = 0.0
-                self._errors = 0
+                # a step that did not contact the site (nothing due yet, only a local check) proves nothing about
+                # the site, so it does not end a backoff that repeated 429s built up
+                if getattr(self.source, "touched_site", True):
+                    self._backoff = 0.0
+                    self._errors = 0
                 # worked out AFTER the fetch, so it sees what that fetch did (items just read, a check just completed)
                 wait = pause() if pause else max(self.cfg["interval_ms"], floor) / 1000.0
                 self.on_listings(listings)
@@ -367,9 +356,14 @@ class Poller(threading.Thread):
                                + (f" - {note}" if note else ""))
             except RateLimited as e:
                 # honor Retry-After, but never retry sooner than the last wait doubled (the site said "slow down")
-                self._backoff = min(max(self._backoff * 2, e.retry_after, ERROR_BACKOFF_MIN_S), MAX_BACKOFF_S)
-                wait = max(self._backoff * random.uniform(1.0, 1.2), e.retry_after)
-                self.on_status(f"Rate limited by the site - waiting {fmt_wait(wait)} before trying again")
+                asked = float(e.retry_after)
+                self._backoff = min(max(self._backoff * 2, asked, ERROR_BACKOFF_MIN_S), MAX_BACKOFF_S)
+                # never longer than MAX_BACKOFF_S, whatever the header says (a huge value or a far-off date)
+                wait = min(max(self._backoff * random.uniform(1.0, 1.2), asked), MAX_BACKOFF_S)
+                why = (f"the site asked for {fmt_wait(asked)}" + (f", capped at {fmt_wait(MAX_BACKOFF_S)}"
+                                                                  if asked > MAX_BACKOFF_S else "")
+                       if asked >= ERROR_BACKOFF_MIN_S else "backing off")
+                self.on_status(f"Rate limited by the site - waiting {fmt_wait(wait)} before trying again ({why})")
             except ChallengeDetected as e:
                 self.on_status(f"PAUSED: {e}")
                 return  # never try to get around it
