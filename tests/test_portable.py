@@ -102,3 +102,14 @@ def test_what_the_nss_modules_need_is_linked_too(shipped, tmp_path, monkeypatch)
     monkeypatch.setattr(portable, "missing_libs", fake)
     env, still = portable.browser_env("/x/chrome", tmp_path / "active")
     assert still == [] and (tmp_path / "active" / "libsqlite3.so.0").exists()
+
+
+@linux_only  # only Linux uses these folders (and os.kill(pid, 0) means something else on Windows)
+def test_each_running_program_gets_its_own_library_folder(tmp_path):
+    base = tmp_path / "active"
+    (base / "999999999").mkdir(parents=True)  # left by a program that is no longer running
+    (base / "1").mkdir()  # pid 1 is always running: not ours, kept
+    mine = portable.libs_work_dir(base)
+    assert mine.name == str(os.getpid())
+    assert not (base / "999999999").exists() and (base / "1").exists()
+

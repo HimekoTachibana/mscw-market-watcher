@@ -110,8 +110,8 @@ def missing_libs(exe: str, extra_path: str = "", also: tuple = ()) -> list[str]:
 
 
 def libs_work_dir(base: Path) -> Path:
-    """A folder of its own for this running program (two copies sharing a settings folder must not delete each
-    other's links). Folders left by programs that are no longer running are removed."""
+    """Linux only. A folder of its own for this running program (two copies sharing a settings folder must not
+    delete each other's links). Folders left by programs that are no longer running are removed."""
     base.mkdir(parents=True, exist_ok=True)
     for d in base.iterdir():
         if d.is_dir() and d.name.isdigit() and int(d.name) != os.getpid() and not _alive(int(d.name)):
