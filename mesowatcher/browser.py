@@ -763,15 +763,31 @@ class BrowserSource:
             loc = page.get_by_placeholder(re.compile(re.escape(base), re.I)).or_(loc)
         return loc.first
 
+    def _current(self, page):
+        """`page`, or the new window if a Cloudflare check reopened the browser as a window while `page` was loading
+        (the old headless page is gone then, and the check was completed in the new window)."""
+        try:
+            replaced = self._ctx is not None and page.context is not self._ctx
+        except Exception:
+            replaced = True
+        if replaced and self._page is not None:
+            if self._spare is self._page:
+                self._spare = None  # it is in use now
+            return self._page
+        return page
+
     def _ensure_loaded(self, page):
+        """Make sure the start page with the filter box is showing; returns the page to go on with."""
         reload_due = not self._loaded_at or time.time() - self._loaded_at > RELOAD_AFTER_S
         if reload_due or self._filter_box(page).count() == 0:
             self._goto_start(page)
+            page = self._current(page)
         try:
             self._filter_box(page).wait_for(state="visible")
         except Exception:
             raise RuntimeError(f"Could not find the item filter box ('{self.bc['filter_placeholder']}') "
                                "on the page. Check the start URL and the filter text in Settings.")
+        return page
 
     # ---- per-item steps
     @staticmethod
@@ -1243,6 +1259,7 @@ class BrowserSource:
         except RateLimited:
             self._release_page(page)
             raise
+        page = self._current(page)
         try:
             self._filter_box(page).wait_for(state="visible")
         except Exception:
@@ -1415,7 +1432,7 @@ class BrowserSource:
         self.touched_site = True
         self._cycles += 1
         self._pass_started = time.time()
-        self._ensure_loaded(page)
+        page = self._ensure_loaded(page)
         out: list[Listing] = []
         notes: list[str] = []
         errors: list[str] = []
@@ -1467,6 +1484,7 @@ class BrowserSource:
             page = self._page
             log.append(f"OK  Browser mode: {self.mode}")
             resp = self._goto_start(page)
+            page = self._current(page)
             log.append(f"OK  Opened {self.bc['start_url']} (HTTP {resp.status if resp else '?'}, "
                        f"title '{page.title()}')")
             if self._filter_box(page).count() == 0:

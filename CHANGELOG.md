@@ -30,7 +30,9 @@ Lighter on meso.watch: fewer requests, and the program now notices when the site
 - A `Retry-After` is capped at 1 hour (the status line says when the site asked for more), an old 429 counts only
   for the rest of its wait, and a step that did not contact the site no longer ends a backoff.
 - After a Cloudflare check is completed in the window that opened for it, the rest of that session stays in the
-  window (Cloudflare's clearance belongs to that browser); the next Start runs headless again.
+  window (Cloudflare's clearance belongs to that browser); the next Start runs headless again. Fixed: when the
+  check appeared while running headless, the scan went on with the old (closed) page and that pass failed; it now
+  continues in the new window, in both scan modes.
 - **Portable downloads, nothing to install.** The Linux and macOS downloads now carry their own Chromium (no
   `playwright install`, no Chrome needed); Windows keeps using the Edge that comes with Windows.
 - **One Linux download for every distribution.** It is now built on Debian 11 (glibc 2.31) instead of the newest

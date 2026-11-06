@@ -997,3 +997,15 @@ def test_each_running_program_gets_its_own_library_folder(tmp_path):
     mine = portable.libs_work_dir(base)
     assert mine.name == str(os.getpid())
     assert not (base / "999999999").exists() and (base / "1").exists()
+
+
+@needs_screen
+def test_rotating_mode_check_opens_a_window_and_the_item_is_set_up_in_it(src, site, no_floors):
+    """The same in the rotating mode: the item being set up continues in the window that opened for the check."""
+    src.close()
+    src.cfg["item_revisit_min_s"] = 0
+    src.cfg["browser"].update(start_url=site + "/pass403", headless=True, scan_mode="windows", challenge_wait_s=15)
+    src.cfg["watchlist"] = [{"name": "Shoes Speed Scroll: Chaos", "max_price": None}]
+    assert len(src.fetch()) == 60
+    assert src.mode == "window" and "shoes speed scroll: chaos" in src._sessions
+    assert not src._sessions["shoes speed scroll: chaos"].page.is_closed()
