@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 
-from . import errorlog
+from . import errorlog, portable
 from .core import (ChallengeDetected, Listing, RateLimited, data_dir, fmt_age, fmt_wait, item_revisit_s, norm,
                    parse_number, parse_retry_after, pass_pause_s, random_pause_s, rotate_delay_range)
 
@@ -526,22 +526,26 @@ class BrowserSource:
                   chromium_sandbox=not no_sandbox)
         if args:
             kw["args"] = args
-        if channel not in ("", "chromium"):
-            kw["channel"] = channel
+        # "chromium" is passed on explicitly: Playwright then uses the full Chromium (the one shipped with the Linux
+        # and macOS downloads) in Chrome's normal headless mode, not the separate headless-shell build.
+        channel = channel or "chromium"
+        kw["channel"] = channel
+        if channel == "chromium":
+            self._prepare_bundled_chromium(kw)
         try:
             try:
-                self._ctx = self._pw.chromium.launch_persistent_context(**kw)
+                self._ctx = self._launch(kw)
             except Exception as first:
                 if "Executable doesn't exist" not in str(first):
                     raise
-                # e.g. "chromium" in the packaged program (no browser is bundled): use one installed on this computer
-                self._act(f"Browser '{channel or 'chromium'}' is not installed; trying the installed ones")
+                # the chosen browser is not on this computer: try the others (the shipped Chromium first)
+                self._act(f"Browser '{channel}' is not installed; trying the others")
                 self._ctx = None
-                for alt in ("msedge", "chrome"):
+                for alt in ("chromium", "msedge", "chrome"):
                     if alt == channel:
                         continue
                     try:
-                        self._ctx = self._pw.chromium.launch_persistent_context(**{**kw, "channel": alt})
+                        self._ctx = self._launch({k: v for k, v in kw.items() if k != "env"} | {"channel": alt})
                         self._act(f"Using '{alt}' instead of '{channel or 'chromium'}'")
                         self._say(f"'{channel or 'chromium'}' is not installed; using {alt} instead.")
                         break
@@ -560,6 +564,35 @@ class BrowserSource:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._spare = self._page
         self._page.set_default_timeout(int(self.bc["page_timeout_ms"]))
+
+    def _prepare_bundled_chromium(self, kw: dict):
+        """Linux: give the shipped Chromium any shared library this computer lacks (see portable.browser_env)."""
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            exe = self._pw.chromium.executable_path
+        except Exception:
+            return
+        if not exe or not os.path.exists(exe):
+            return
+        env, still = portable.browser_env(exe, data_dir() / "browser-libs-active")
+        if env is not None:
+            kw["env"] = env
+            self._act("Using the program's own copies of libraries this computer does not have: "
+                      + ", ".join(sorted(p.name for p in (data_dir() / "browser-libs-active").iterdir())))
+        if still:
+            self._act("Chromium may not start: this computer lacks " + ", ".join(still))
+
+    def _launch(self, kw: dict):
+        """Start the browser. If the OS blocks Chromium's sandbox (Ubuntu 24.04+ AppArmor rule, some containers),
+        start it once more without the sandbox, as Playwright does by default."""
+        try:
+            return self._pw.chromium.launch_persistent_context(**kw)
+        except Exception as e:
+            if not kw.get("chromium_sandbox") or not portable.is_sandbox_error(e):
+                raise
+            self._act("The system does not allow Chromium's sandbox here; starting it without the sandbox")
+            return self._pw.chromium.launch_persistent_context(**{**kw, "chromium_sandbox": False})
 
     def close(self):
         for obj, meth in ((self._ctx, "close"), (self._pw, "stop")):

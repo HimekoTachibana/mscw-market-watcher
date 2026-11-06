@@ -13,12 +13,17 @@ VERSION = re.search(r'^VERSION = "([^"]+)"', _src, re.M).group(1)
 FULL = re.search(r'^FULL_NAME = "([^"]+)"', _src, re.M).group(1)
 NAME = f"{FULL} v{VERSION}"
 
-pw_datas, pw_binaries, pw_hidden = collect_all("playwright")  # Playwright's bundled driver
+# Playwright's driver, plus the Chromium installed into it with PLAYWRIGHT_BROWSERS_PATH=0 (Linux, macOS builds)
+pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
+
+# Linux: fallback copies of libraries Chromium needs, used only where the user's system lacks them (portable.py)
+_libs = Path(SPECPATH) / "build" / "browser-libs"
+extra_datas = [(str(_libs), "browser-libs")] if sys.platform.startswith("linux") and _libs.is_dir() else []
 
 a = Analysis(
     ["run.py"],
     binaries=pw_binaries,
-    datas=[("CHANGELOG.md", "."), ("mesowatcher/icon_ids.txt", "mesowatcher")] + pw_datas,
+    datas=[("CHANGELOG.md", "."), ("mesowatcher/icon_ids.txt", "mesowatcher")] + pw_datas + extra_datas,
     hiddenimports=["PIL._tkinter_finder", "greenlet", "pyee", "pyee.asyncio"] + pw_hidden,
 )
 pyz = PYZ(a.pure)

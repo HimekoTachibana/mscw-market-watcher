@@ -143,7 +143,7 @@ def main(argv: list[str]) -> int:
             rec("FAIL", f"import {mod}", str(e))
 
     # ---- sound player (optional: without one the program uses the window bell)
-    players = [c for c in ("paplay", "aplay", "play") if shutil.which(c)]
+    players = [c for c in core.LINUX_PLAYERS if shutil.which(c)] if sys.platform.startswith("linux") else ["system"]
     rec("INFO", "sound player", ", ".join(players) if players else "none found - the window bell is used instead")
 
     # ---- the window itself
@@ -179,6 +179,18 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         rec("FAIL", "browser driver", f"{type(e).__name__}: {e}")
 
+    # ---- the Chromium shipped inside the download (Linux, macOS)
+    from . import portable
+    shipped = portable.local_browsers_dir()
+    if shipped is not None:
+        names = ", ".join(sorted(d.name for d in shipped.iterdir() if d.is_dir()))
+        rec("PASS", "shipped browser", f"{names} in {shipped}")
+    elif getattr(sys, "frozen", False) and sys.platform != "win32":
+        rec("FAIL", "shipped browser", "this download should contain its own Chromium but none was found")
+    libs = portable.bundled_libs_dir()
+    if libs is not None:
+        rec("INFO", "fallback libraries", f"{len(list(libs.iterdir()))} in {libs}")
+
     # ---- a real browser, driven the same way the program drives it
     if want_browser and node:
         try:
@@ -186,18 +198,19 @@ def main(argv: list[str]) -> int:
             env = {**os.environ, **get_driver_env()}
         except Exception:
             env = dict(os.environ)
-        try:
-            out = subprocess.run([node, cli, "install", "chromium"], env=env, capture_output=True,
-                                 text=True, timeout=900)
-            tail = (out.stdout + out.stderr).strip().splitlines()[-3:]
-            rec("PASS" if out.returncode == 0 else "FAIL", "install chromium",
-                " / ".join(t.strip() for t in tail)[:300])
-        except Exception as e:
-            rec("FAIL", "install chromium", f"{type(e).__name__}: {e}")
+        if shipped is None and sys.platform != "win32":  # running from source: fetch Chromium first
+            try:
+                out = subprocess.run([node, cli, "install", "chromium"], env=env, capture_output=True,
+                                     text=True, timeout=900)
+                tail = (out.stdout + out.stderr).strip().splitlines()[-3:]
+                rec("PASS" if out.returncode == 0 else "FAIL", "install chromium",
+                    " / ".join(t.strip() for t in tail)[:300])
+            except Exception as e:
+                rec("FAIL", "install chromium", f"{type(e).__name__}: {e}")
         try:
             from . import browser
             cfg = core.Config(Path(tmp) / "config.json")
-            cfg["browser"].update(channel="chromium", headless=True)
+            cfg["browser"].update(channel="msedge" if sys.platform == "win32" else "chromium", headless=True)
             src = browser.BrowserSource(cfg)
             try:
                 src._open()

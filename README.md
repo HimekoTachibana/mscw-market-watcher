@@ -20,6 +20,27 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
   so you can keep playing. Only if you tick "Show the browser window" (to pass a Cloudflare check
   yourself) does a window open.
 
+## Download and run (nothing to install)
+
+Download the file for your system from the latest release, unpack it anywhere (your home folder, a USB stick)
+and start the program inside. No installer, no admin rights, no Python, no browser to install:
+
+* **Windows:** unzip, run `MSCW Market Watcher vX.Y.Z.exe`. Uses the Edge that comes with Windows 10/11.
+* **Linux:** `tar -xzf "MSCW Market Watcher vX.Y.Z (Linux).tar.gz"`, then run `./"MSCW Market Watcher vX.Y.Z"`
+  inside the folder (or double-click it). One download for every x86-64 distribution with glibc 2.31 or
+  newer: Ubuntu 20.04+, Debian 11+, Linux Mint, Pop!_OS, Fedora, RHEL/Rocky/Alma 9, openSUSE, Arch,
+  Manjaro, EndeavourOS and the gaming distributions **CachyOS**, **Bazzite** and **SteamOS** (Steam Deck:
+  use Desktop Mode). It carries its own Python, Tk and Chromium; if a minimal install lacks one of the
+  libraries Chromium uses (NSS, CUPS, ATK, ...), the program's own copy is used for that one only. It works
+  on immutable systems (Bazzite, SteamOS) because nothing is written outside the folder and your settings.
+* **macOS (Apple Silicon):** unpack and right-click -> **Open** the first time (the app is unsigned). It carries
+  its own Chromium. If macOS still refuses to start it, run `xattr -dr com.apple.quarantine` on the `.app` once.
+
+Settings, the watchlist and listings are kept in your user folder (`%APPDATA%\MesoWatcher`,
+`~/.config/MesoWatcher`, `~/Library/Application Support/MesoWatcher`), so a new version finds them again.
+Sound uses whatever the system has (`paplay`, `pw-play`, `aplay`, `play` or `ffplay` on Linux); with none of
+them the window bell is used.
+
 ## First-time setup
 
 1. **Item list:** builds itself on first launch from OSMS Data Explorer, cross-checked against
@@ -48,8 +69,8 @@ Price, Listed, 24h AVG (the site's TYPICAL price), Discount (% below it).
 * **Exact names only:** the full name is typed in the filter and only the row with exactly that name
   is opened (case and punctuation ignored). A near match is never clicked; the status line tells you
   what the site showed instead, so fix the spelling in your watchlist.
-* **Browser:** Windows uses the Edge that ships with Windows. On macOS pick `chrome`; on Linux install
-  Chromium once with `python -m playwright install chromium` and pick `chromium`.
+* **Browser:** Windows uses the Edge that ships with Windows; the Linux and macOS downloads use the Chromium
+  they carry (`chromium` in Settings). `chrome` or `msedge` can be picked instead if installed.
 * **Being polite to the site:** every response from meso.watch is watched, including the requests the page
   makes in the background after a click or scroll. If the site answers **429** or **503** ("slow down"),
   the scan stops at once and waits for the time the site asks (Retry-After), then backs off further on
@@ -66,8 +87,9 @@ pip install -r requirements.txt
 python run.py
 pytest -q          # optional
 ```
-Linux needs Tk (`sudo apt install python3-tk`) and an audio player (`paplay` or `aplay`).
-On Linux/macOS without Edge, run `python -m playwright install chromium` once.
+From source (not the download) you need Python 3.12+ with Tk from your distribution (the package is usually
+`python3-tk`, `python3-tkinter` or, on Arch-based systems, `tk`), and Chromium for Playwright once:
+`python -m playwright install chromium`.
 
 ## Upload to GitHub
 
@@ -98,11 +120,12 @@ program inside it). The version comes from `VERSION` in `mesowatcher/core.py`.
 * **Windows:** install Python 3.12 (tick "Add to PATH"), then double-click `build_windows.bat`.
   Result: `dist\MSCW Market Watcher v0.6.0\MSCW Market Watcher v0.6.0.exe` (plus a zip in `release\`).
   It uses the Edge already on Windows.
-* **Linux:** `sudo apt install python3-tk python3-venv alsa-utils`, then `./build_linux.sh`.
-  Result: `dist/MSCW Market Watcher v0.6.0/` and a `.tar.gz` in `release/`. Run
-  `python -m playwright install chromium` once (the script prints the exact command) and pick
-  `chromium` in Settings.
-* **macOS:** `./build_macos.sh`, result `dist/MSCW Market Watcher v0.6.0.app` (unsigned: right-click -> Open).
+* **Linux:** Python 3.12+ with Tk and venv, then `./build_linux.sh`. Result: `dist/MSCW Market Watcher v0.6.0/`
+  and a `.tar.gz` in `release/`, with Chromium inside. A local build only runs on systems whose glibc is at least
+  as new as the build machine's; the GitHub Actions build (Debian 11, glibc 2.31) is the one to publish, and it is
+  started and self-tested on Ubuntu, Debian, Fedora, openSUSE, Arch, CachyOS, SteamOS and Bazzite.
+* **macOS:** `./build_macos.sh`, result `dist/MSCW Market Watcher v0.6.0.app` with Chromium inside (unsigned:
+  right-click -> Open).
 * **All three automatically:** push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The GitHub
   Actions workflow builds Windows, Linux and macOS, runs the tests, and attaches the zips to the
   release (or download them from the run's Artifacts). You can also start it by hand under Actions -> Build

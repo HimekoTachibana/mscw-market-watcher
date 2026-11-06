@@ -24,6 +24,19 @@ Lighter on meso.watch: fewer requests, and the program now notices when the site
 - The page is reloaded at most every 2 hours (was every 10 passes).
 - **Settings saved by older versions are updated once** to headless + one page, and a delay between items shorter
   than 20-40 s is raised. You can change them back in Settings.
+- **Portable downloads, nothing to install.** The Linux and macOS downloads now carry their own Chromium (no
+  `playwright install`, no Chrome needed); Windows keeps using the Edge that comes with Windows.
+- **One Linux download for every distribution.** It is now built on Debian 11 (glibc 2.31) instead of the newest
+  Ubuntu, so it starts on Ubuntu 20.04+, Debian 11+, Fedora, RHEL 9, openSUSE, Arch, CachyOS, Bazzite and SteamOS.
+  The release build starts the finished download on Ubuntu 22.04, Debian 12, Fedora, openSUSE Tumbleweed, Arch,
+  CachyOS, SteamOS (Holo) and Bazzite before publishing.
+- If a minimal Linux install lacks a library Chromium needs (NSS, CUPS, ATK, AT-SPI, xkbcommon, a few X
+  extensions), the program uses its own copy of **only that library**, for the browser only. Libraries tied to the
+  graphics driver or sound system are never replaced.
+- Where the system blocks Chromium's sandbox (Ubuntu 24.04+'s AppArmor rule), the browser is started once more
+  without it instead of failing.
+- Sound on Linux also works with PipeWire's `pw-play` (Fedora, Bazzite, SteamOS, CachyOS) and `ffplay`.
+- No distribution-specific instructions (`apt install ...`) remain in the build script or README.
 - Tests: rate limit seen on a background request (with Retry-After), other sites' 429s ignored, Cloudflare check
   pages not counted as rate limits, the cool-down, the per-item floor, the pause between passes, no browser restart
   after an error, headless mode and the one-time settings update.

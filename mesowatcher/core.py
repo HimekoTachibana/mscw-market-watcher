@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "source_mode": "browser",  # "browser" (click through the site) or "api" (JSON endpoint)
     "browser": {
         "start_url": "https://meso.watch/",
-        "channel": {"win32": "msedge", "darwin": "chrome"}.get(sys.platform, "chromium"),
+        "channel": "msedge" if sys.platform == "win32" else "chromium",  # Linux/macOS: the Chromium shipped with the program
         "headless": True,  # True = a real headless browser (no window); False = show the browser window
         "lookback_min": 180,  # scroll the Newest list down to listings from the last N minutes (3 hours)
         "listing_cap": 200,  # safety cap on listings read per item
@@ -388,6 +388,24 @@ class Poller(threading.Thread):
                 started = time.monotonic()
                 self._halt.wait(min(remaining, 0.2))
                 remaining -= min(remaining, time.monotonic() - started)
+
+
+# Sound players found on Linux systems without installing anything: PulseAudio / PipeWire-Pulse (paplay),
+# PipeWire (pw-play: Fedora, Bazzite, SteamOS, CachyOS, Ubuntu 22.10+), ALSA (aplay), SoX (play), FFmpeg (ffplay).
+LINUX_PLAYERS = ("paplay", "pw-play", "aplay", "play", "ffplay")
+
+
+def linux_player(path: str) -> Optional[list]:
+    for c in LINUX_PLAYERS:
+        if shutil.which(c):
+            if c == "aplay":
+                return [c, "-q", path]
+            if c == "play":
+                return [c, "-q", path]
+            if c == "ffplay":
+                return [c, "-nodisp", "-autoexit", "-loglevel", "quiet", path]
+            return [c, path]
+    return None
 
 
 def fmt_wait(seconds: float) -> str:
@@ -1076,12 +1094,7 @@ class Beeper:
                 import winsound
                 winsound.PlaySound(f, winsound.SND_FILENAME | winsound.SND_ASYNC)
                 return True
-            cmd = ["afplay", f] if sys.platform == "darwin" else None
-            if cmd is None:
-                for c in ("paplay", "aplay", "play"):
-                    if shutil.which(c):
-                        cmd = [c, "-q", f] if c == "aplay" else [c, f]
-                        break
+            cmd = ["afplay", f] if sys.platform == "darwin" else linux_player(f)
             if cmd and shutil.which(cmd[0]):
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True
