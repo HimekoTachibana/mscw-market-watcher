@@ -95,7 +95,13 @@ jobs:
 
       - name: System packages (build machine only; the finished program needs none of them)
         run: |
-          apt-get update
+          # Debian 11 support has ended, so its packages are served from the archive now
+          rm -f /etc/apt/sources.list.d/*
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian bullseye main' \
+            'deb http://archive.debian.org/debian bullseye-updates main' \
+            'deb http://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends binutils xvfb xauth alsa-utils fonts-liberation \
             libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 \
             libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxext6 libexpat1 libasound2 \
