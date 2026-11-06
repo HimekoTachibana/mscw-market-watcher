@@ -68,6 +68,10 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean mesowatcher.spec
 
+      - name: Put Chromium into the app (macOS)
+        if: runner.os == 'macOS'
+        run: python tools/add_browser_macos.py
+
       - name: Self-test of the built program (macOS, its own Chromium)
         if: runner.os == 'macOS'
         shell: bash

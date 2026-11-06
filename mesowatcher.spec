@@ -15,6 +15,9 @@ NAME = f"{FULL} v{VERSION}"
 
 # Playwright's driver, plus the Chromium installed into it with PLAYWRIGHT_BROWSERS_PATH=0 (Linux, macOS builds)
 pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
+if sys.platform == "darwin":  # macOS: Chromium is copied into the .app afterwards (tools/add_browser_macos.py)
+    pw_datas = [d for d in pw_datas if ".local-browsers" not in d[0]]
+    pw_binaries = [b for b in pw_binaries if ".local-browsers" not in b[0]]
 
 # Linux: fallback copies of libraries Chromium needs, used only where the user's system lacks them (portable.py)
 _libs = Path(SPECPATH) / "build" / "browser-libs"

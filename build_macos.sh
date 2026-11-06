@@ -11,5 +11,6 @@ python -m pip install -r requirements.txt pyinstaller
 PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --no-shell chromium
 APPNAME=$(python tools/version.py name)
 pyinstaller --noconfirm --clean mesowatcher.spec
+python tools/add_browser_macos.py
 python tools/package.py
 echo "SUCCESS: dist/$APPNAME.app  (right-click > Open the first time; it is unsigned)"
