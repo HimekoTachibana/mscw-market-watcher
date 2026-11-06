@@ -262,7 +262,7 @@ def src(tmp_path, site):
     cfg = core.Config(tmp_path / "c.json")
     cfg["delay_min_ms"] = cfg["delay_max_ms"] = 500  # keep tests fast (production: random 500-5000)
     cfg["browser"].update(start_url=site + "/", channel="chromium", headless=True,
-                          page_timeout_ms=8000, challenge_wait_s=2)
+                          page_timeout_ms=20000, challenge_wait_s=2)
     s = browser.BrowserSource(cfg, profile_dir=tmp_path / "profile")
     try:
         s._open()

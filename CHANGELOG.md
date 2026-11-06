@@ -20,6 +20,8 @@ Fixes found with the error log from v0.5.6.
 - **Stop ends the scan** after the item being read (it used to go on through the whole Watchlist).
 - **Browser "chromium" is not bundled in the downloaded program** (log: "Executable doesn't exist"). If the chosen
   browser is not installed, the program now uses Microsoft Edge or Chrome instead and says so.
+- A page that is slow to load on the first try (a cold browser start) is retried once before it counts as an
+  error. (A Windows build failed once because of exactly that in the tests.)
 - The error log now records, for every item, how many listings were read and why, how many rows the For sale
   now list had, and when a search result with the exact name did not appear.
 

@@ -554,7 +554,14 @@ class BrowserSource:
 
     def _goto_start(self, page):
         self._act(f"Loading {self.bc['start_url']}")
-        resp = page.goto(self.bc["start_url"], wait_until="domcontentloaded")
+        try:
+            resp = page.goto(self.bc["start_url"], wait_until="domcontentloaded")
+        except Exception as e:
+            if "Timeout" not in type(e).__name__:
+                raise
+            # a cold browser start can be slow: one more try before calling it an error
+            self._act("The page was slow to load; trying once more")
+            resp = page.goto(self.bc["start_url"], wait_until="domcontentloaded")
         if self._clear_challenge(page, resp):
             # The check page itself is served with HTTP 403/503. Once the check is completed that first answer is
             # out of date: judge the page that is showing now, not the answer to the first request.
